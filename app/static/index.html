@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outreach Infra</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14171c; --muted: #636b78; --line: #e3e6eb;
+    --accent: #2f6fed; --ok: #1f9d55; --warn: #c27c0e; --bad: #d23c3c; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1216; --panel: #171b21; --ink: #e8ebef; --muted: #98a1ae; --line: #262c35;
+            --accent: #5b8ff9; --ok: #3fbf74; --warn: #e0a33a; --bad: #ef6464; --chip: #212730; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line);
+           background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: -.01em; }
+  header .provider { font-size: 12px; color: var(--muted); }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button { background: none; border: 0; padding: 7px 12px; border-radius: 8px; color: var(--muted);
+               font: inherit; cursor: pointer; }
+  nav button.active { background: var(--chip); color: var(--ink); font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; font-weight: 500; } a:hover { text-decoration: underline; }
+  .spacer { flex: 1; }
+  .btn { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 7px 12px;
+         font: inherit; font-weight: 600; cursor: pointer; }
+  .btn.ghost { background: var(--chip); color: var(--ink); font-weight: 500; }
+  .btn.sm { padding: 4px 8px; font-size: 12px; }
+  main { padding: 20px 24px 60px; max-width: 1280px; margin: 0 auto; }
+  section { display: none; } section.active { display: block; }
+  .grid { display: grid; gap: 14px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 14px; }
+  .two { grid-template-columns: 2fr 1fr; } @media (max-width: 900px) { .two { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+  .card h2 { font-size: 13px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .kpi .v { font-size: 26px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); white-space: nowrap; }
+  .chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+  .bar { height: 6px; background: var(--chip); border-radius: 4px; overflow: hidden; width: 90px; display: inline-block; vertical-align: middle; }
+  .bar > i { display: block; height: 100%; }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input, select { font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line);
+                  background: var(--panel); color: var(--ink); }
+  .inbox { display: grid; grid-template-columns: 320px 1fr; gap: 14px; min-height: 520px; }
+  @media (max-width: 800px) { .inbox { grid-template-columns: 1fr; } }
+  .thread-list { overflow-y: auto; max-height: 640px; padding: 0; }
+  .thread-item { padding: 12px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .thread-item:hover, .thread-item.sel { background: var(--chip); }
+  .thread-item .n { font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+  .thread-item .p { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .msgs { display: flex; flex-direction: column; gap: 8px; max-height: 520px; overflow-y: auto; padding: 4px; }
+  .msg { max-width: 70%; padding: 8px 12px; border-radius: 14px; }
+  .msg.out { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.in { align-self: flex-start; background: var(--chip); border-bottom-left-radius: 4px; }
+  .msg .meta { font-size: 11px; opacity: .75; margin-top: 2px; }
+  pre.out { background: var(--chip); padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 12px; margin: 12px 0 0; white-space: pre-wrap; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--bg); padding: 10px 14px;
+           border-radius: 10px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 420px; }
+  .toast.show { opacity: 1; }
+  canvas { max-height: 260px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Outreach Infra</h1>
+  <span class="provider" id="provider"></span>
+  <nav id="nav">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="lines">Phone lines</button>
+    <button data-tab="email">Email</button>
+    <button data-tab="inbox">Inbox</button>
+    <button data-tab="dialer">Dialer</button>
+    <button data-tab="compliance">Compliance</button>
+  </nav>
+  <span class="spacer"></span>
+  <button class="btn" id="tick" title="Send a live batch through the mock carrier and re-run health checks">Simulate traffic</button>
+</header>
+
+<main>
+  <!-- OVERVIEW -->
+  <section id="overview" class="active">
+    <div class="grid kpis" id="kpis"></div>
+    <div class="grid two">
+      <div class="card"><h2>SMS outcomes · last 7 days</h2><canvas id="smsChart"></canvas></div>
+      <div class="card"><h2>Calls · last 7 days</h2><canvas id="callChart"></canvas></div>
+    </div>
+  </section>
+
+  <!-- LINES -->
+  <section id="lines">
+    <div class="card" style="margin-bottom:14px">
+      <div class="row">
+        <strong>Provision lines</strong>
+        <input id="pv-ac" placeholder="Area code" size="9" value="214">
+        <input id="pv-n" type="number" min="1" max="50" value="2" style="width:70px">
+        <button class="btn" id="pv-go">Buy</button>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="spam-go">Run spam check</button>
+        <button class="btn ghost" id="sweep-go">Run health sweep</button>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card scroll"><h2>Line pool</h2><table id="linesTable"></table></div>
+      <div class="card"><h2 id="histTitle">Health history</h2><canvas id="histChart"></canvas>
+        <p class="muted small" id="histHint">Select a line to see its score over time.</p></div>
+    </div>
+  </section>
+
+  <!-- EMAIL -->
+  <section id="email">
+    <div class="card" style="margin-bottom:14px">
+      <div class="row">
+        <strong>Check domain DNS</strong>
+        <input id="dom-in" placeholder="yourdomain.com" size="28">
+        <button class="btn" id="dom-go">Check SPF / DKIM / DMARC</button>
+        <span class="muted small">Runs live DNS lookups.</span>
+      </div>
+      <pre class="out" id="dom-out" hidden></pre>
+    </div>
+    <div class="card scroll" style="margin-bottom:14px"><h2>Sending domains</h2><table id="domTable"></table></div>
+    <div class="grid two">
+      <div class="card scroll"><h2>Mailboxes &amp; warm-up</h2><table id="mbTable"></table></div>
+      <div class="card"><h2 id="mbTitle">Warm-up curve</h2><canvas id="mbChart"></canvas></div>
+    </div>
+  </section>
+
+  <!-- INBOX -->
+  <section id="inbox">
+    <div class="inbox">
+      <div class="card thread-list" id="threads"></div>
+      <div class="card">
+        <h2 id="thTitle">Select a conversation</h2>
+        <div class="muted small" id="thSub"></div>
+        <div class="msgs" id="msgs"></div>
+        <div class="row" style="margin-top:12px" id="replyRow" hidden>
+          <input id="replyIn" placeholder="Reply via SMS…" style="flex:1">
+          <button class="btn" id="replyGo">Send</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DIALER -->
+  <section id="dialer">
+    <div class="card" style="margin-bottom:14px">
+      <div class="row">
+        <strong>Start dial session</strong>
+        <label class="muted small">Leads</label><input id="dl-n" type="number" value="30" min="1" max="500" style="width:80px">
+        <label class="muted small">Lines</label>
+        <select id="dl-lines"><option value="1">1 · power</option><option value="2">2</option><option value="3" selected>3</option><option value="5">5</option></select>
+        <button class="btn" id="dl-go">Dial</button>
+      </div>
+      <p class="muted small" style="margin:10px 0 0">Multi-line mode drops a line automatically when abandon rate exceeds the 3% FTC limit. Calls outside 8am–9pm recipient time, and opted-out numbers, are blocked.</p>
+      <pre class="out" id="dl-out" hidden></pre>
+    </div>
+    <div class="card scroll"><h2>Recent calls</h2><table id="callTable"></table></div>
+  </section>
+
+  <!-- COMPLIANCE -->
+  <section id="compliance">
+    <div class="card" style="margin-bottom:14px">
+      <div class="row">
+        <strong>Add to suppression list</strong>
+        <input id="sp-v" placeholder="Phone or email" size="26">
+        <select id="sp-ch"><option>all</option><option>sms</option><option>voice</option><option>email</option></select>
+        <select id="sp-r"><option value="dnc">DNC registry</option><option value="manual">Manual</option><option value="complaint">Complaint</option></select>
+        <button class="btn" id="sp-go">Suppress</button>
+      </div>
+    </div>
+    <div class="card scroll"><h2>Suppression list</h2><table id="supTable"></table></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const charts = {};
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = v => v == null ? "—" : (v * 100).toFixed(1) + "%";
+const when = s => s ? new Date(s + (s.endsWith("Z") ? "" : "Z")).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "—";
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts,
+                               body: opts.body ? JSON.stringify(opts.body) : undefined});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : r.statusText);
+  return data;
+}
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3500); }
+function chart(id, cfg) {
+  charts[id]?.destroy();
+  Chart.defaults.color = css("--muted"); Chart.defaults.borderColor = css("--line");
+  charts[id] = new Chart($("#" + id), cfg);
+}
+const statusChip = s => {
+  const cls = {active: "ok", warming: "warn", resting: "warn", quarantined: "bad", paused: "bad", retired: ""}[s] ?? "";
+  return `<span class="chip ${cls}">${esc(s)}</span>`;
+};
+const scoreBar = v => {
+  const c = v >= 70 ? css("--ok") : v >= 50 ? css("--warn") : css("--bad");
+  return `<span class="bar"><i style="width:${v}%;background:${c}"></i></span> <b>${v.toFixed(0)}</b>`;
+};
+const yes = b => b ? `<span class="chip ok">pass</span>` : `<span class="chip bad">fail</span>`;
+
+// ---------------------------------------------------------------- overview
+async function loadOverview() {
+  const o = await api("/api/overview");
+  $("#provider").textContent = `provider: ${o.provider}`;
+  const L = o.lines, S = o.sms_7d, M = o.mailboxes;
+  const calls = Object.values(o.calls_7d).reduce((a, b) => a + b, 0);
+  const k = [
+    ["Active lines", L.active ?? 0, `${L.resting ?? 0} resting · ${L.quarantined ?? 0} quarantined`],
+    ["SMS sent (7d)", S.attempted, `${S.by_status.blocked ?? 0} blocked by compliance`],
+    ["Delivery rate", pct(S.delivery_rate), `carrier-filtered ${pct(S.filter_rate)}`],
+    ["Replies (7d)", S.replies, `${S.optouts} opt-outs`],
+    ["Calls (7d)", calls, `${o.calls_7d.answered ?? 0} answered`],
+    ["Mailboxes", Object.values(M).reduce((a, b) => a + b, 0), `${M.warming ?? 0} warming · ${M.paused ?? 0} paused`],
+  ];
+  $("#kpis").innerHTML = k.map(([l, v, s]) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="muted small">${s}</div></div>`).join("");
+
+  chart("smsChart", {type: "bar", data: {
+    labels: o.sms_series.map(r => r.day.slice(5)),
+    datasets: [
+      {label: "Delivered", data: o.sms_series.map(r => r.delivered), backgroundColor: css("--ok")},
+      {label: "Filtered", data: o.sms_series.map(r => r.filtered), backgroundColor: css("--bad")},
+      {label: "Failed", data: o.sms_series.map(r => r.failed), backgroundColor: css("--warn")},
+      {label: "Blocked", data: o.sms_series.map(r => r.blocked), backgroundColor: css("--muted")},
+    ]}, options: {responsive: true, scales: {x: {stacked: true}, y: {stacked: true}}}});
+  const co = o.calls_7d, keys = Object.keys(co);
+  chart("callChart", {type: "doughnut", data: {labels: keys, datasets: [{data: keys.map(x => co[x]),
+    backgroundColor: keys.map(x => ({answered: css("--ok"), voicemail: css("--accent"), abandoned: css("--bad"), failed: css("--bad"), busy: css("--warn"), no_answer: css("--muted")}[x] ?? css("--chip")))}]},
+    options: {plugins: {legend: {position: "bottom"}}}});
+}
+
+// ---------------------------------------------------------------- lines
+async function loadLines() {
+  const rows = await api("/api/lines");
+  $("#linesTable").innerHTML = `<tr><th>Number</th><th>Status</th><th>Health</th><th>Spam label</th><th>Today</th><th>Reason</th><th></th></tr>` +
+    rows.map(n => `<tr>
+      <td><a href="#" data-hist="${n.id}" data-e="${n.e164}">${n.e164}</a><div class="muted small">${n.area_code} · ${esc(n.campaign ?? "")}</div></td>
+      <td>${statusChip(n.status)}${n.rested_until ? `<div class="muted small">until ${when(n.rested_until)}</div>` : ""}</td>
+      <td>${scoreBar(n.health_score)}</td>
+      <td><span class="chip ${n.spam_label === "clean" ? "ok" : n.spam_label === "spam_likely" ? "bad" : ""}">${n.spam_label}</span></td>
+      <td>${n.sent_today}/${n.daily_cap}</td>
+      <td class="small muted">${esc(n.status_reason ?? "")}</td>
+      <td><div class="row" style="flex-wrap:nowrap">${n.status === "retired" ? "" : `
+        ${n.status === "active" ? `<button class="btn ghost sm" data-act="rest" data-id="${n.id}">Rest</button>` : `<button class="btn ghost sm" data-act="reactivate" data-id="${n.id}">Reactivate</button>`}
+        <button class="btn ghost sm" data-act="replace" data-id="${n.id}">Replace</button>`}</div></td>
+    </tr>`).join("");
+  const worst = rows.find(n => n.status !== "retired");
+  if (worst && !charts.histChart) loadHistory(worst.id, worst.e164);
+}
+async function loadHistory(id, e164) {
+  const h = await api(`/api/lines/${id}/history`);
+  $("#histTitle").textContent = `Health history · ${e164}`; $("#histHint").hidden = true;
+  chart("histChart", {type: "line", data: {labels: h.map(x => when(x.at)), datasets: [
+    {label: "Score", data: h.map(x => x.score), borderColor: css("--accent"), tension: .25, yAxisID: "y"},
+    {label: "Filtered %", data: h.map(x => +(x.filter_rate * 100).toFixed(1)), borderColor: css("--bad"), tension: .25, yAxisID: "y1"},
+    {label: "Opt-out %", data: h.map(x => +(x.optout_rate * 100).toFixed(1)), borderColor: css("--warn"), tension: .25, yAxisID: "y1"},
+  ]}, options: {scales: {y: {min: 0, max: 100}, y1: {position: "right", min: 0, grid: {drawOnChartArea: false}}, x: {ticks: {maxTicksLimit: 6}}}}});
+}
+$("#linesTable").addEventListener("click", async e => {
+  const t = e.target;
+  if (t.dataset.hist) { e.preventDefault(); return loadHistory(t.dataset.hist, t.dataset.e); }
+  if (t.dataset.act) {
+    const r = await api(`/api/lines/${t.dataset.id}/${t.dataset.act}`, {method: "POST"});
+    toast(r.new ? `Retired ${r.retired}, bought ${r.new}` : `Line is now ${r.status}`); loadLines();
+  }
+});
+$("#pv-go").onclick = async () => {
+  try { const r = await api("/api/lines/provision", {method: "POST", body: {area_code: $("#pv-ac").value, count: +$("#pv-n").value, campaign: "sellers-q4"}});
+        toast(`Provisioned ${r.join(", ")}`); loadLines(); } catch (e) { toast(e.message); }
+};
+$("#spam-go").onclick = async () => { const r = await api("/api/monitor/spam-check", {method: "POST"}); toast(`${r.filter(x => x.label === "spam_likely").length} of ${r.length} lines flagged Spam Likely`); loadLines(); };
+$("#sweep-go").onclick = async () => { const r = await api("/api/monitor/health-sweep", {method: "POST"}); const a = r.filter(x => x.action !== "none"); toast(a.length ? a.map(x => `${x.number}: ${x.action}`).join(" · ") : "All lines within policy"); loadLines(); };
+
+// ---------------------------------------------------------------- email
+let mailboxes = [];
+async function loadEmail() {
+  const ds = await api("/api/email/domains");
+  $("#domTable").innerHTML = `<tr><th>Domain</th><th>MX</th><th>SPF</th><th>DKIM</th><th>DMARC</th><th>Issues</th></tr>` +
+    ds.map(d => `<tr><td><b>${esc(d.name)}</b><div class="muted small">checked ${when(d.last_checked)}</div></td><td>${yes(d.mx)}</td><td>${yes(d.spf)}</td><td>${yes(d.dkim)}</td>
+      <td>${yes(d.dmarc)} <span class="muted small">${d.dmarc_policy ? "p=" + d.dmarc_policy : ""}</span></td>
+      <td class="small">${d.issues.map(esc).join("<br>") || '<span class="muted">none</span>'}</td></tr>`).join("");
+  mailboxes = await api("/api/email/mailboxes");
+  $("#mbTable").innerHTML = `<tr><th>Mailbox</th><th>Status</th><th>Day</th><th>Today's quota</th><th>Bounce 7d</th><th>Inbox placement</th><th></th></tr>` +
+    mailboxes.map((m, i) => `<tr>
+      <td><a href="#" data-mb="${i}">${esc(m.mailbox)}</a></td>
+      <td>${statusChip(m.status)}<div class="muted small">${esc(m.reason ?? "")}</div></td>
+      <td>${m.day}/${m.warmup_days}</td><td>${m.quota}</td><td>${pct(m.bounce_rate)}</td><td>${pct(m.inbox_placement)}</td>
+      <td>${m.status === "paused" ? `<button class="btn ghost sm" data-resume="${m.id}">Resume</button>` : ""}</td></tr>`).join("");
+  if (mailboxes.length) showMailbox(0);
+}
+function showMailbox(i) {
+  const m = mailboxes[i], s = m.series;
+  $("#mbTitle").textContent = `Warm-up curve · ${m.mailbox}`;
+  chart("mbChart", {type: "line", data: {labels: s.map(x => x.day.slice(5)), datasets: [
+    {label: "Sent", data: s.map(x => x.sent), borderColor: css("--accent"), backgroundColor: css("--accent"), tension: .2},
+    {label: "Bounces", data: s.map(x => x.bounces), borderColor: css("--bad"), backgroundColor: css("--bad"), tension: .2},
+    {label: "Inbox %", data: s.map(x => x.inbox_placement == null ? null : Math.round(x.inbox_placement * 100)), borderColor: css("--ok"), borderDash: [4, 4], tension: .2, yAxisID: "y1"},
+  ]}, options: {scales: {y: {min: 0}, y1: {position: "right", min: 0, max: 100, grid: {drawOnChartArea: false}}, x: {ticks: {maxTicksLimit: 8}}}}});
+}
+$("#mbTable").addEventListener("click", async e => {
+  if (e.target.dataset.mb) { e.preventDefault(); showMailbox(+e.target.dataset.mb); }
+  if (e.target.dataset.resume) { await api(`/api/email/mailboxes/${e.target.dataset.resume}/resume`, {method: "POST"}); toast("Resumed; ramp stepped back one week"); loadEmail(); }
+});
+$("#dom-go").onclick = async () => {
+  const out = $("#dom-out"); out.hidden = false; out.textContent = "Resolving…";
+  try { const r = await api("/api/email/domains/check", {method: "POST", body: {domain: $("#dom-in").value}});
+        out.textContent = `${r.ready_for_cold_email ? "✅ Ready for cold email" : "⚠️ Not ready"}\n\n` +
+          `SPF:   ${r.spf.record ?? "missing"}\nDKIM:  ${r.dkim.selector ? "found on selector '" + r.dkim.selector + "'" : "not found"}\nDMARC: ${r.dmarc.record ?? "missing"}\n\n` +
+          (r.issues.length ? "Fix:\n- " + r.issues.join("\n- ") : "No issues found.");
+        loadEmail(); } catch (e) { out.textContent = e.message; }
+};
+
+// ---------------------------------------------------------------- inbox
+let currentLead = null;
+async function loadInbox() {
+  const t = await api("/api/inbox");
+  $("#threads").innerHTML = t.map(x => `<div class="thread-item ${x.lead_id === currentLead ? "sel" : ""}" data-lead="${x.lead_id}">
+      <div class="n"><span>${esc(x.name)}</span><span class="muted small">${when(x.at)}</span></div>
+      <div class="p">${x.opted_out ? '<span class="chip bad">opted out</span> ' : ""}${x.unread ? '<span class="chip ok">new</span> ' : ""}${esc(x.last_message)}</div>
+      <div class="p">${esc(x.address)}</div></div>`).join("") || `<p class="muted" style="padding:14px">No replies yet.</p>`;
+}
+async function openThread(id) {
+  currentLead = id;
+  const t = await api(`/api/inbox/${id}`);
+  $("#thTitle").textContent = t.lead.name;
+  $("#thSub").textContent = `${t.lead.phone} · ${t.lead.address}`;
+  $("#msgs").innerHTML = t.messages.map(m => `<div class="msg ${m.direction === "outbound" ? "out" : "in"}">${esc(m.body)}
+    <div class="meta">${m.channel} · ${m.direction === "outbound" ? esc(m.status) + " · from " + esc(m.from) : "received"} · ${when(m.at)}</div></div>`).join("");
+  $("#msgs").scrollTop = 1e9; $("#replyRow").hidden = false; loadInbox();
+}
+$("#threads").addEventListener("click", e => { const el = e.target.closest("[data-lead]"); if (el) openThread(+el.dataset.lead); });
+$("#replyGo").onclick = async () => {
+  const body = $("#replyIn").value.trim(); if (!body || !currentLead) return;
+  try { const r = await api(`/api/inbox/${currentLead}/reply`, {method: "POST", body: {body}});
+        toast(r.status === "blocked" ? `Blocked: ${r.block_reason}` : `Sent (${r.status}) from ${r.from}`);
+        $("#replyIn").value = ""; openThread(currentLead); } catch (e) { toast(e.message); }
+};
+
+// ---------------------------------------------------------------- dialer
+async function loadCalls() {
+  const c = await api("/api/dialer/calls?limit=100");
+  $("#callTable").innerHTML = `<tr><th>Session</th><th>Lead</th><th>From</th><th>Outcome</th><th>Duration</th><th>When</th></tr>` +
+    c.map(x => `<tr><td class="muted">${x.session}</td><td>${esc(x.lead)}</td><td>${x.from}</td>
+      <td><span class="chip ${x.outcome === "answered" ? "ok" : ["abandoned", "failed"].includes(x.outcome) ? "bad" : ""}">${x.outcome}</span></td>
+      <td>${x.duration_s ? x.duration_s + "s" : "—"}</td><td class="muted small">${when(x.at)}</td></tr>`).join("");
+}
+$("#dl-go").onclick = async () => {
+  const r = await api("/api/dialer/sessions", {method: "POST", body: {count: +$("#dl-n").value, lines: +$("#dl-lines").value}});
+  const out = $("#dl-out"); out.hidden = false;
+  out.textContent = `Dialed ${r.dialed} · answered ${r.answered} · abandoned ${r.abandoned} (${pct(r.abandon_rate)}) · blocked ${r.blocked}\nLines: started at ${r.lines_start}, ended at ${r.lines_end}`;
+  loadCalls();
+};
+
+// ---------------------------------------------------------------- compliance
+async function loadSup() {
+  const s = await api("/api/suppressions");
+  $("#supTable").innerHTML = `<tr><th>Value</th><th>Channel</th><th>Reason</th><th>Added</th></tr>` +
+    s.map(x => `<tr><td>${esc(x.value)}</td><td>${x.channel}</td><td><span class="chip">${x.reason}</span></td><td class="muted small">${when(x.at)}</td></tr>`).join("");
+}
+$("#sp-go").onclick = async () => {
+  try { const r = await api("/api/suppressions", {method: "POST", body: {value: $("#sp-v").value, channel: $("#sp-ch").value, reason: $("#sp-r").value}});
+        toast(`Suppressed ${r.suppressed}`); loadSup(); } catch (e) { toast(e.message); }
+};
+
+// ---------------------------------------------------------------- shell
+const loaders = {overview: loadOverview, lines: loadLines, email: loadEmail, inbox: loadInbox, dialer: loadCalls, compliance: loadSup};
+let tab = "overview";
+$("#nav").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  tab = b.dataset.tab; history.replaceState(null, "", "#" + tab);
+  document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("active", x === b));
+  document.querySelectorAll("main section").forEach(s => s.classList.toggle("active", s.id === tab));
+  loaders[tab]();
+});
+$("#tick").onclick = async () => {
+  try { const r = await api("/api/simulate/tick", {method: "POST"});
+        const s = Object.entries(r.sent).map(([k, v]) => `${v} ${k}`).join(", ");
+        toast(`Batch: ${s} · ${r.replies} replies` + (r.health_actions.length ? ` · ${r.health_actions.map(a => a.number + " " + a.action).join(", ")}` : ""));
+        loaders[tab](); } catch (e) { toast(e.message); }
+};
+const initial = document.querySelector(`#nav button[data-tab="${location.hash.slice(1)}"]`);
+initial ? initial.click() : loadOverview();
+</script>
+</body>
+</html>
