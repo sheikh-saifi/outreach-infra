@@ -39,14 +39,16 @@ def overview(db: Session = Depends(get_db)):
     since = now - timedelta(days=7)
     lines = dict(db.execute(select(PhoneNumber.status, func.count()).group_by(PhoneNumber.status)).all())
 
-    out = db.execute(select(Message.status, func.count()).where(
-        Message.channel == "sms", Message.direction == "outbound", Message.created_at >= since
-    ).group_by(Message.status)).all()
+    campaign_sms = (Message.channel == "sms", Message.direction == "outbound",
+                    Message.is_auto_reply.is_(False), Message.created_at >= since)
+    out = db.execute(select(Message.status, func.count()).where(*campaign_sms)
+                     .group_by(Message.status)).all()
     out = dict(out)
     attempted = sum(v for k, v in out.items() if k != "blocked")
     inbound = db.scalars(select(Message.body).where(
         Message.channel == "sms", Message.direction == "inbound", Message.created_at >= since)).all()
-    optouts = sum(1 for b in inbound if compliance.classify_keyword(b) == "stop")
+    kinds = [compliance.classify_keyword(b) for b in inbound]
+    optouts = kinds.count("stop")
 
     day = func.date(Message.created_at)
     series = db.execute(select(
@@ -55,8 +57,7 @@ def overview(db: Session = Depends(get_db)):
         func.sum(case((Message.status == "filtered", 1), else_=0)),
         func.sum(case((Message.status == "failed", 1), else_=0)),
         func.sum(case((Message.status == "blocked", 1), else_=0)),
-    ).where(Message.channel == "sms", Message.direction == "outbound", Message.created_at >= since)
-        .group_by(day).order_by(day)).all()
+    ).where(*campaign_sms).group_by(day).order_by(day)).all()
 
     calls = dict(db.execute(select(CallLog.outcome, func.count()).where(CallLog.started_at >= since)
                             .group_by(CallLog.outcome)).all())
@@ -67,7 +68,7 @@ def overview(db: Session = Depends(get_db)):
             "attempted": attempted, "by_status": out,
             "delivery_rate": round(out.get("delivered", 0) / attempted, 3) if attempted else None,
             "filter_rate": round(out.get("filtered", 0) / attempted, 3) if attempted else None,
-            "replies": len(inbound) - optouts, "optouts": optouts,
+            "replies": kinds.count(None), "optouts": optouts, "wrong_numbers": kinds.count("wrong_number"),
         },
         "sms_series": [{"day": str(r[0]), "delivered": r[1], "filtered": r[2], "failed": r[3], "blocked": r[4]}
                        for r in series],
@@ -116,11 +117,15 @@ def provision_lines(body: ProvisionIn, db: Session = Depends(get_db)):
 @api.post("/lines/{number_id}/{action}")
 def line_action(number_id: int, action: str, db: Session = Depends(get_db)):
     n = _number_or_404(db, number_id)
+    if n.status == "retired":
+        raise HTTPException(409, "line is retired and released at the carrier; provision a new one")
     if action == "rest":
+        if n.status != "active":
+            raise HTTPException(409, f"only active lines can be rested (line is {n.status})")
         n.status, n.status_reason = "resting", "manual"
         n.rested_until = utcnow() + timedelta(hours=settings.rest_hours)
     elif action == "reactivate":
-        n.status, n.status_reason, n.rested_until = "active", "manual", None
+        line_health.reactivate(n, utcnow(), "manual")
     elif action == "retire":
         provisioning.retire(db, n)
     elif action == "replace":
@@ -307,7 +312,8 @@ def inbox(db: Session = Depends(get_db)):
         Message.direction == "inbound", Message.is_read.is_(False)).group_by(Message.lead_id)).all())
     return [{"lead_id": lead.id, "name": lead.name, "phone": lead.phone, "address": lead.property_address,
              "channel": m.channel, "last_message": m.body, "at": m.created_at,
-             "opted_out": compliance.classify_keyword(m.body) == "stop", "unread": unread.get(lead.id, 0)}
+             "opted_out": bool(lead.phone and compliance.is_suppressed(db, lead.phone, "sms")),
+             "unread": unread.get(lead.id, 0)}
             for m, lead in rows]
 
 
@@ -330,7 +336,12 @@ class ReplyIn(BaseModel):
 
 @api.post("/inbox/{lead_id}/reply")
 def reply(lead_id: int, body: ReplyIn, db: Session = Depends(get_db)):
-    return send_sms(SendIn(lead_id=lead_id, template=body.body), db)
+    lead = _lead_or_404(db, lead_id)
+    try:
+        m = sms.send(db, lead, body.body, automated=False)
+    except sms.NoLineAvailable as e:
+        raise HTTPException(503, str(e))
+    return {"id": m.id, "status": m.status, "from": m.from_addr, "block_reason": m.block_reason}
 
 
 # ------------------------------------------------------------------ simulation (mock provider)
@@ -362,6 +373,10 @@ async def inbound_sms(request: Request, db: Session = Depends(get_db)):
     return sms.handle_inbound(db, form["From"], form["To"], form.get("Body", ""))
 
 
+# Callbacks can arrive out of order (a late "sent" after "delivered"); never move a message backwards.
+STATUS_RANK = {"queued": 0, "sending": 1, "sent": 2, "delivered": 3, "failed": 3, "filtered": 3}
+
+
 @webhooks.post("/sms/status")
 async def sms_status(request: Request, db: Session = Depends(get_db)):
     form = await _verified_form(request)
@@ -369,7 +384,9 @@ async def sms_status(request: Request, db: Session = Depends(get_db)):
     if not msg:
         return {"ok": False}
     status, code = form.get("MessageStatus"), form.get("ErrorCode")
-    msg.status = "filtered" if code == "30007" else {"undelivered": "failed"}.get(status, status)
-    msg.error_code = code or msg.error_code
-    db.commit()
-    return {"ok": True}
+    new = "filtered" if code == "30007" else {"undelivered": "failed"}.get(status, status)
+    if STATUS_RANK.get(new, -1) > STATUS_RANK.get(msg.status, -1):
+        msg.status = new
+        msg.error_code = code or msg.error_code
+        db.commit()
+    return {"ok": True, "status": msg.status}

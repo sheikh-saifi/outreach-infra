@@ -162,7 +162,7 @@
         <select id="dl-lines"><option value="1">1 · power</option><option value="2">2</option><option value="3" selected>3</option><option value="5">5</option></select>
         <button class="btn" id="dl-go">Dial</button>
       </div>
-      <p class="muted small" style="margin:10px 0 0">Multi-line mode drops a line automatically when abandon rate exceeds the 3% FTC limit. Calls outside 8am–9pm recipient time, and opted-out numbers, are blocked.</p>
+      <p class="muted small" style="margin:10px 0 0">Multi-line mode drops a line automatically when the 30-day abandon rate exceeds the 3% FTC limit. Calls outside 8am–9pm recipient time, opted-out numbers, and numbers already contacted 3 times in 24h are blocked.</p>
       <pre class="out" id="dl-out" hidden></pre>
     </div>
     <div class="card scroll"><h2>Recent calls</h2><table id="callTable"></table></div>
@@ -225,7 +225,7 @@ async function loadOverview() {
     ["Active lines", L.active ?? 0, `${L.resting ?? 0} resting · ${L.quarantined ?? 0} quarantined`],
     ["SMS sent (7d)", S.attempted, `${S.by_status.blocked ?? 0} blocked by compliance`],
     ["Delivery rate", pct(S.delivery_rate), `carrier-filtered ${pct(S.filter_rate)}`],
-    ["Replies (7d)", S.replies, `${S.optouts} opt-outs`],
+    ["Replies (7d)", S.replies, `${S.optouts} opt-outs · ${S.wrong_numbers} wrong numbers`],
     ["Calls (7d)", calls, `${o.calls_7d.answered ?? 0} answered`],
     ["Mailboxes", Object.values(M).reduce((a, b) => a + b, 0), `${M.warming ?? 0} warming · ${M.paused ?? 0} paused`],
   ];
@@ -363,7 +363,7 @@ async function loadCalls() {
 $("#dl-go").onclick = async () => {
   const r = await api("/api/dialer/sessions", {method: "POST", body: {count: +$("#dl-n").value, lines: +$("#dl-lines").value}});
   const out = $("#dl-out"); out.hidden = false;
-  out.textContent = `Dialed ${r.dialed} · answered ${r.answered} · abandoned ${r.abandoned} (${pct(r.abandon_rate)}) · blocked ${r.blocked}\nLines: started at ${r.lines_start}, ended at ${r.lines_end}`;
+  out.textContent = `Dialed ${r.dialed} · answered ${r.answered} · abandoned ${r.abandoned} (${pct(r.abandon_rate)} this session, ${pct(r.abandon_rate_30d)} over 30 days) · blocked ${r.blocked}\nLines: started at ${r.lines_start}, ended at ${r.lines_end}`;
   loadCalls();
 };
 

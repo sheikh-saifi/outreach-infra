@@ -26,6 +26,10 @@ class PhoneNumber(Base):
     status_reason: Mapped[str | None] = mapped_column(String(255))
     rested_until: Mapped[datetime | None] = mapped_column(DateTime)
     daily_cap: Mapped[int] = mapped_column(Integer, default=150)
+    daily_call_cap: Mapped[int] = mapped_column(Integer, default=100)
+    # Health is computed only from traffic after this point; reset when a line comes back from rest
+    # so it isn't judged forever on the traffic that got it rested.
+    metrics_since: Mapped[datetime | None] = mapped_column(DateTime)
     health_score: Mapped[float] = mapped_column(Float, default=100.0)
     spam_label: Mapped[str] = mapped_column(String(32), default="unknown")  # clean | spam_likely | unknown
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -98,6 +102,7 @@ class Message(Base):
     status: Mapped[str] = mapped_column(String(16), index=True)
     error_code: Mapped[str | None] = mapped_column(String(16))
     block_reason: Mapped[str | None] = mapped_column(String(128))  # why compliance stopped the send
+    is_auto_reply: Mapped[bool] = mapped_column(Boolean, default=False)  # STOP/START confirmations
     provider_sid: Mapped[str | None] = mapped_column(String(64))
     number_id: Mapped[int | None] = mapped_column(ForeignKey("phone_numbers.id"), index=True)
     mailbox_id: Mapped[int | None] = mapped_column(ForeignKey("mailboxes.id"), index=True)

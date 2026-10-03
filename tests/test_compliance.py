@@ -25,7 +25,9 @@ def test_quiet_hours_use_recipient_local_time(db, make_lead):
 
 def test_unknown_area_code_must_be_ok_in_every_zone(db, make_lead):
     unknown = make_lead("+19995551234")
-    assert compliance.can_contact(db, unknown, "sms", NOON_ET)[0]
+    afternoon_et = datetime(2026, 3, 10, 19, 0, tzinfo=timezone.utc)  # 3pm ET, 9am Honolulu
+    assert compliance.can_contact(db, unknown, "sms", afternoon_et)[0]
+    assert not compliance.can_contact(db, unknown, "sms", NOON_ET)[0]   # 6am in Hawaii
     assert not compliance.can_contact(db, unknown, "sms", EARLY_PT)[0]  # 7am on the west coast
 
 

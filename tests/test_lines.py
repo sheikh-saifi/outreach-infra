@@ -28,7 +28,8 @@ def _traffic(db, line, n=100, filtered=0, failed_landline=0, stops=0, replies=0,
 def test_score_formula():
     assert score(LineMetrics(100, 1.0, 0.0, 0.0, 0.0), "clean") == 100
     assert score(LineMetrics(100, 0.9, 0.10, 0.0, 0.0), "clean") == 70
-    assert score(LineMetrics(100, 1.0, 0.0, 0.0, 0.0), "spam_likely") == 70
+    # a Spam Likely label alone must be enough to rest a line (threshold is < 70)
+    assert score(LineMetrics(100, 1.0, 0.0, 0.0, 0.0), "spam_likely") == 65
     # too few messages: rates are ignored, only the spam label counts
     assert score(LineMetrics(5, 0.2, 0.8, 0.0, 0.0), "clean") == 100
 

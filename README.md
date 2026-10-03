@@ -23,7 +23,7 @@ With Postgres:
 docker compose up --build    # app on :8000, Postgres on :5432
 ```
 
-Run the tests with `pytest` (25 tests, about 3s).
+Run the tests with `pytest` (56 tests, about 4s). There are no migrations yet, so after pulling schema changes, delete `outreach.db` and restart.
 
 ## What to try in the dashboard
 
@@ -65,7 +65,15 @@ Data lives in SQLAlchemy models ([app/models.py](app/models.py)), which run on S
 
 ## Key design decisions
 
-**One compliance gate for every channel.** `compliance.can_contact()` runs before every SMS, call, and reply, including replies an agent types in the inbox. A blocked send is still logged with `status=blocked` and a reason, which leaves an audit trail. Quiet hours use the *recipient's* local time. When we can't place the recipient, the gate only allows the send if it falls inside 8am–9pm in **every** continental US zone. An SMS opt-out also covers voice. START re-subscribes only opt-outs, never DNC entries.
+**One compliance gate for every channel.** `compliance.can_contact()` runs before every SMS, call, and reply, including replies an agent types in the inbox. A blocked send is still logged with `status=blocked` and a reason, which leaves an audit trail. The gate covers:
+
+- **Quiet hours** in the *recipient's* local time (Arizona has no DST). When we can't place the recipient, the send is allowed only inside 8am–9pm in **every** US zone, Hawaii and Alaska included.
+- **Frequency cap:** at most 3 texts and calls per *phone number* per 24h, the limit in the Florida, Oklahoma, and Maryland laws. It counts per phone, not per lead, because one owner often has several properties.
+- **Opt-outs:** exact keywords (STOP, QUIT…) and natural-language revocations ("please stop texting me", "don't contact me"), which the FCC has required honoring since April 2025. "Yes" is deliberately **not** an opt-in keyword, because it's the most common answer to "would you consider an offer?"
+- **Wrong numbers:** suppressed on every channel. Reassigned numbers are a leading source of TCPA suits.
+- An SMS opt-out also covers voice. START re-subscribes only opt-outs, never DNC or wrong-number entries. Each confirmation is sent once and logged.
+
+**Automation stops when a person replies.** Once a phone number has replied, automated follow-ups to it are blocked, and the conversation continues in the inbox with a human. Inbox replies skip the frequency cap but still go through suppression and quiet hours. A reply is threaded to the property we last texted about from that line, not just any lead with that phone.
 
 **The health score separates line problems from list problems.** Carrier error 30007 (filtered) and opt-outs count against a line. Landline and unreachable-number errors (30003, 30005, 30006) say nothing about the line, so they're excluded. A line with a bad lead list shouldn't get rested.
 
@@ -76,11 +84,17 @@ Data lives in SQLAlchemy models ([app/models.py](app/models.py)), which run on S
 | "Spam Likely" label | −30 |
 | Reply rate | +1 per 1% (max +10) |
 
-Below 70 the line rests for 48h, then comes back automatically. Below 50 it's quarantined until a human reactivates or replaces it. Rates are ignored until a line has sent at least 20 messages.
+Below 70 the line rests for 48h. Below 50 it's quarantined until a human reactivates or replaces it. Rates are ignored until a line has sent at least 20 messages.
+
+When a rest ends, the line gets a fresh reputation lookup. If it's still "Spam Likely", the rest is extended. Otherwise it comes back with a **reset metrics window**, so it's judged on new traffic rather than on the traffic that got it rested. Without the reset, a rested line goes straight back into rest on the next sweep and never recovers. Replacing a line moves its conversations to the new number.
 
 **Warm-up acts only on meaningful samples.** An early bug from testing: with 5–10 emails a day, one bounce reads as a 5% bounce rate and paused healthy mailboxes. The pause rule now needs 50+ sends and at least 3 bounces (or 2 complaints) in the trailing 7 days. Resuming a paused mailbox steps the ramp back a week instead of continuing at full volume.
 
-**Sender selection.** The order is: the number the lead was first contacted from (sticky, so the conversation stays in one thread), then a line in the lead's area code (local presence), then the healthiest line with remaining daily capacity.
+**Sender selection.** The order is: the number the lead was first contacted from (sticky, so the conversation stays in one thread), then a line in the lead's area code (local presence), then the healthiest line with remaining daily capacity. Texts and calls have separate per-line daily caps (150 and 100).
+
+**The dialer measures abandonment over 30 days.** The FTC's 3% limit applies per campaign over 30 days, so the dialer counts the trailing month, not just the current session, before deciding how many lines to dial.
+
+**SPF lookups are counted recursively.** The 10-lookup limit includes everything nested inside each `include:`. github.com, for example, has 8 top-level mechanisms but 10 lookups in total.
 
 **The provider interface is narrow on purpose.** `buy_number`, `release_number`, `send_sms`, `place_call`, and `reputation_lookup`. Moving to Telnyx, Bandwidth, or our own SIP trunk changes only the adapter.
 
@@ -91,10 +105,18 @@ Below 70 the line rests for 48h, then comes back automatically. Below 50 it's qu
 | DNS checks (SPF/DKIM/DMARC/MX) against live DNS | Carrier delivery outcomes, filtering, and call outcomes (`MockCarrier`) |
 | Compliance logic, quiet hours, STOP/START handling | Spam-label lookups (production would use Hiya / TNS / First Orion) |
 | Health scoring, rest/quarantine policy, line rotation | Warm-up email sending and inbox-placement seed tests |
-| Twilio REST adapter (buy, send, call) and webhook signature verification | iMessage (see the roadmap: research only) |
+| Twilio REST adapter (buy, send, call), webhook signature verification, out-of-order status handling | iMessage (see the roadmap: research only) |
 | Dialer pacing and abandon-rate control | Agent audio bridging (would be TwiML or FreeSWITCH) |
 
 The Twilio adapter follows the Twilio REST API but has **not** been run against a live account.
+
+### Known limitations (next steps)
+
+- **No authentication** on the API or dashboard. Anyone who can reach the server can send messages. Add login and roles before any real deployment.
+- **Jobs run on request**, not on a schedule. The health sweep, spam checks, and warm-up evaluation run when the dashboard or a simulate call triggers them. Some GET endpoints update state (warm-up status, read receipts); in production these move to a scheduler (APScheduler or Celery beat).
+- **Daily caps reset at midnight UTC**, not in each line's local time.
+- **Area-code time zones** use a partial map. Production needs the full NANPA dataset. Cell numbers also move with their owners, so the property's location is a useful second signal.
+- **No migrations yet** (Alembic is next).
 
 ## About "stealth / protection"
 
@@ -111,7 +133,7 @@ app/
   providers/         base protocol, mock carrier, Twilio adapter
   services/          compliance, sms, line_health, provisioning, dialer, email_auth, warmup, simulation
   static/index.html  dashboard
-tests/               25 tests: compliance, line health, routing, DNS parsing, warm-up, dialer, webhooks
+tests/               56 tests: compliance, line health, routing, DNS parsing, warm-up, dialer, webhooks
 docs/ROADMAP.md      R&D → production plan
 ```
 

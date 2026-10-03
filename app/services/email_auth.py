@@ -29,7 +29,35 @@ def _has_mx(name: str) -> bool:
         return False
 
 
-def parse_spf(records: list[str]) -> dict:
+LOOKUP_MECHANISMS = ("include", "a", "mx", "ptr", "exists", "redirect")
+
+
+def _spf_record(records: list[str]) -> str | None:
+    return next((r for r in records if r.lower().startswith("v=spf1")), None)
+
+
+def count_spf_lookups(record: str, resolve=None, depth: int = 0, seen: set | None = None) -> int:
+    """DNS lookups an SPF check triggers, following include:/redirect= recursively.
+    RFC 7208 caps the *total* at 10; exceeding it is a permerror, i.e. SPF fails outright.
+    With `resolve=None` only the top level is counted."""
+    seen = seen if seen is not None else set()
+    total = 0
+    for term in record.split()[1:]:
+        name, _, target = term.lstrip("+~-?").partition(":")
+        if name.startswith("redirect="):
+            name, target = "redirect", name.split("=", 1)[1]
+        if name not in LOOKUP_MECHANISMS:
+            continue
+        total += 1
+        if name in ("include", "redirect") and resolve and target and depth < 10 and target not in seen:
+            seen.add(target)
+            nested = _spf_record(resolve(target))
+            if nested:
+                total += count_spf_lookups(nested, resolve, depth + 1, seen)
+    return total
+
+
+def parse_spf(records: list[str], resolve=None) -> dict:
     spf = [r for r in records if r.lower().startswith("v=spf1")]
     if not spf:
         return {"ok": False, "record": None, "issues": ["No SPF record. Add a TXT record starting with v=spf1."]}
@@ -38,14 +66,17 @@ def parse_spf(records: list[str]) -> dict:
     rec = spf[0]
     issues = []
     terms = rec.split()
-    lookups = sum(1 for t in terms if t.split(":")[0].lstrip("+~-?") in ("include", "a", "mx", "ptr", "exists", "redirect"))
+    lookups = count_spf_lookups(rec, resolve)
     if lookups > 10:
-        issues.append(f"{lookups} DNS lookups; SPF allows at most 10.")
+        issues.append(f"{lookups} DNS lookups (counting nested includes); SPF allows at most 10, "
+                      "so receivers treat SPF as failed. Flatten or remove includes.")
     if terms[-1] in ("+all", "all"):
         issues.append("Ends in +all, which authorises the whole internet to send as you.")
+    elif terms[-1] == "?all":
+        issues.append("Ends in ?all (neutral), which gives receivers no instruction. Use ~all or -all.")
     elif terms[-1] not in ("-all", "~all") and not terms[-1].startswith("redirect="):
         issues.append("No ~all / -all terminator.")
-    return {"ok": not issues, "record": rec, "issues": issues}
+    return {"ok": not issues, "record": rec, "lookups": lookups, "issues": issues}
 
 
 def parse_dmarc(records: list[str]) -> dict:
@@ -77,7 +108,7 @@ def check_dkim(domain: str, selectors: list[str] | None = None) -> dict:
 
 def check_domain(name: str, dkim_selectors: list[str] | None = None) -> dict:
     name = name.strip().lower()
-    spf = parse_spf(_txt(name))
+    spf = parse_spf(_txt(name), resolve=_txt)
     dmarc = parse_dmarc(_txt(f"_dmarc.{name}"))
     dkim = check_dkim(name, dkim_selectors)
     mx = _has_mx(name)

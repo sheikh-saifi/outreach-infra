@@ -21,10 +21,13 @@ class Settings(BaseSettings):
     health_quarantine_threshold: float = 50.0  # below this a line is pulled from rotation
     rest_hours: int = 48
     default_daily_sms_cap: int = 150
+    default_daily_call_cap: int = 100  # per line; heavy dialing is the fastest route to "Spam Likely"
 
     # --- Compliance (TCPA quiet hours, recipient local time) ---
     quiet_hours_start: int = 21  # no outreach at/after 9pm
     quiet_hours_end: int = 8     # no outreach before 8am
+    max_touches_per_24h: int = 3  # texts + calls per phone number (FL, OK, MD limits)
+    max_abandon_rate: float = 0.03  # FTC TSR, measured per campaign over 30 days
 
     # --- Email warm-up ---
     warmup_start_volume: int = 5
