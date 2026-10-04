@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
 
+    # Optional: hand email sending to Instantly (we stay the compliance / orchestration layer).
+    instantly_api_key: str = ""
+
     # Used to sign unsubscribe links and to authenticate the inbound-email webhook.
     secret_key: str = "dev-secret-change-me"
     webhook_secret: str = ""

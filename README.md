@@ -12,6 +12,7 @@ Around that core are phone-line health and spam monitoring, sending-domain healt
 It runs end to end on **simulated providers**, so you can try every feature without paying for numbers or mailboxes. Set `TELEPHONY_PROVIDER=twilio` or `EMAIL_PROVIDER=smtp` to use real ones.
 
 - **How email and SMS work, step by step:** [docs/EMAIL_AND_SMS.md](docs/EMAIL_AND_SMS.md)
+- **Sending ~3M cold emails a month: capacity, Instantly vs alternatives, unit economics:** [docs/SCALE_AND_UNIT_ECONOMICS.md](docs/SCALE_AND_UNIT_ECONOMICS.md)
 - **R&D → production plan:** [docs/ROADMAP.md](docs/ROADMAP.md)
 
 ![dashboard](docs/dashboard.png)
@@ -45,7 +46,7 @@ Only the recipients are simulated (replies, opt-outs, out-of-office messages, bo
 
 With Postgres: `docker compose up --build` (app on :8000, Postgres on :5432).
 
-Tests: `pytest` runs 96 tests in about 5 seconds. There are no migrations yet, so after pulling schema changes, delete `outreach.db` (and `outreach.db-wal` / `outreach.db-shm` if present) and restart.
+Tests: `pytest` runs 110 tests in about 5 seconds. There are no migrations yet, so after pulling schema changes, delete `outreach.db` (and `outreach.db-wal` / `outreach.db-shm` if present) and restart.
 
 ## What to try in the dashboard
 
@@ -53,6 +54,7 @@ Tests: `pytest` runs 96 tests in about 5 seconds. There are no migrations yet, s
 |---|---|
 | **Overview** | 7-day SMS, email, and call outcomes, plus the campaign pipeline |
 | **Campaigns** | Each campaign's pipeline (active / replied / completed / stopped). **View** shows its steps with content checks, and every lead's current step, next send time, and reason (e.g. "deferred: outside 8am-9pm"). Activate, pause, or enroll leads. Background jobs show their last result, with a **Run** button for each. **New campaign** checks the content of each step as you type. |
+| **Scale & cost** | Enter a monthly volume and get the inboxes, domains, and warm-up time it needs, plus the monthly cost, cost per 1k emails, and cost per reply for Instantly / Smartlead with Google, Microsoft, Mailforge, or Infraforge inboxes, or a fully in-house build. Every price is editable, with its source. |
 | **Phone lines** | Health score, spam label, daily usage, and why a line was rested or quarantined. Buy, rest, reactivate, or replace lines. Click a number to see its health history. |
 | **Email** | **Live** SPF/DKIM/DMARC/MX checks and **live** blacklist checks for any domain. **Live** email-address verification. Per-domain status and 7-day bounce rate. Each mailbox's warm-up curve, warm-up volume, and cold-email quota used today. |
 | **Inbox** | SMS and email replies threaded per lead (bounces and out-of-office messages filtered out). Reply by SMS or email; email replies thread under the original message, from the same mailbox. |
@@ -91,6 +93,13 @@ scheduler.py (background thread): dispatcher 30s · line health 15m · spam labe
 ```
 
 Data lives in SQLAlchemy models ([app/models.py](app/models.py)), on SQLite (WAL mode) locally and on Postgres in Docker or production.
+
+### Working with Instantly / Smartlead
+
+At millions of emails a month, sending, inbox rotation, and warm-up are far cheaper to rent than to build ([why](docs/SCALE_AND_UNIT_ECONOMICS.md#3-would-i-use-instantly-yes-for-sending-and-why)). The provider interface lets this system act as the layer around the sending platform:
+
+- `POST /api/integrations/instantly/push` pushes compliant, verified leads into an Instantly campaign (set `INSTANTLY_API_KEY`).
+- Instantly webhooks post to `/webhooks/instantly`. Replies, bounces, and unsubscribes update the shared suppression list and stop the lead's SMS sequences too.
 
 ## Key design decisions
 
@@ -172,13 +181,13 @@ app/
   scheduler.py       background jobs
   models.py          SQLAlchemy models
   config.py          every threshold and policy (env-overridable, see .env.example)
-  providers/         telephony (mock, Twilio) and email (mock, SMTP) adapters
-  services/          campaigns, compliance, sms, email_sender, email_verify, content_lint,
+  providers/         telephony (mock, Twilio), email (mock, SMTP) and Instantly adapters
+  services/          campaigns, compliance, sms, email_sender, email_verify, content_lint, scale_planner,
                      line_health, domain_health, warmup, enrollment_events, dialer, provisioning,
                      email_auth, simulation
   static/index.html  dashboard
-tests/               96 tests
-docs/                EMAIL_AND_SMS.md (how it works), ROADMAP.md (R&D → production)
+tests/               110 tests
+docs/                EMAIL_AND_SMS.md (how it works), SCALE_AND_UNIT_ECONOMICS.md (3M/month plan), ROADMAP.md
 ```
 
 API docs: http://localhost:8000/docs

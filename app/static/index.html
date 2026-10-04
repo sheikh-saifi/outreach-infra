@@ -86,6 +86,12 @@
              color: var(--ink); width: 100%; min-height: 84px; resize: vertical; }
   .full { width: 100%; }
   .msg .subj { font-weight: 600; margin-bottom: 2px; }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 14px; }
+  .form-grid label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  .form-grid input { width: 100%; }
+  tr.best td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .num { text-align: right; white-space: nowrap; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -95,6 +101,7 @@
   <nav id="nav">
     <button data-tab="overview" class="active">Overview</button>
     <button data-tab="campaigns">Campaigns</button>
+    <button data-tab="scale">Scale &amp; cost</button>
     <button data-tab="lines">Phone lines</button>
     <button data-tab="email">Email</button>
     <button data-tab="inbox">Inbox</button>
@@ -156,6 +163,33 @@
           <button class="btn" id="ncCreate">Create campaign</button>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- SCALE & COST -->
+  <section id="scale">
+    <div class="card" style="margin-bottom:14px">
+      <h2>What it takes to send at scale</h2>
+      <div class="form-grid" id="planInputs"></div>
+      <p class="muted small" style="margin:10px 0 0">Change any number and everything recalculates. Prices are editable below, with sources (checked <span id="pricesChecked"></span>).</p>
+    </div>
+    <div class="grid kpis" id="planKpis"></div>
+    <div class="grid two" style="margin-bottom:14px">
+      <div class="card scroll"><h2>Monthly cost by setup</h2><table id="stackTable"></table></div>
+      <div class="card"><h2>Where the money goes</h2><div style="position:relative;height:420px"><canvas id="stackChart" style="max-height:none"></canvas></div></div>
+    </div>
+    <div class="grid two" style="margin-bottom:14px">
+      <div class="card scroll">
+        <h2>Biggest lever: safe sends per inbox per day</h2>
+        <table id="sensTable"></table>
+        <p class="muted small" id="rampText"></p>
+      </div>
+      <div class="card"><h2>Build vs buy</h2><div id="bvb"></div></div>
+    </div>
+    <div class="card">
+      <details><summary>Prices &amp; assumptions (editable)</summary>
+        <div class="scroll" style="margin-top:10px"><table id="priceTable"></table></div>
+      </details>
     </div>
   </section>
 
@@ -594,6 +628,77 @@ $("#ncCreate").onclick = async () => {
         ncSteps.length = 0; $("#ncName").value = ""; renderSteps(); loadCampaigns(); } catch (e) { toast(e.message); }
 };
 
+// ---------------------------------------------------------------- scale & cost
+const PLAN_FIELDS = [
+  ["monthly_emails", "Emails per month", 1], ["sending_days", "Sending days / month", 1],
+  ["per_inbox_per_day", "Cold sends / inbox / day", 1], ["inboxes_per_domain", "Inboxes per domain", 1],
+  ["reserve_pct", "Reserve inboxes %", 100], ["domain_burn_pct", "Domains replaced / month %", 100],
+  ["emails_per_lead", "Emails per lead (steps)", 1], ["reply_rate", "Reply rate per lead %", 100],
+  ["positive_share", "Interested share of replies %", 100], ["google_ms_share", "Hybrid: Google/MS share %", 100],
+];
+const money = v => "$" + Math.round(v).toLocaleString();
+const cents = v => "$" + Number(v).toFixed(2);
+const COMP_COLORS = {platform: "--accent", inboxes: "--ok", domains: "--warn", verification: "--muted",
+                     dedicated_ips: "--bad", warmup: "--bad", hosting: "--muted", engineering: "--warn"};
+let planState = null, planTimer;
+async function loadScale() {
+  if (!planState) {
+    planState = await api("/api/planner");
+    $("#planInputs").innerHTML = PLAN_FIELDS.map(([k, label, mult]) =>
+      `<label>${label}<input type="number" step="any" data-plan="${k}" data-mult="${mult}" value="${+(planState.inputs[k] * mult).toFixed(4)}"></label>`).join("");
+    $("#priceTable").innerHTML = `<tr><th>Item</th><th class="num">Value</th><th>Unit</th><th>Source</th></tr>` +
+      Object.entries(planState.prices).map(([k, p]) => `<tr><td>${esc(p.label)}</td>
+        <td class="num"><input type="number" step="any" data-price="${k}" value="${p.value}" style="width:110px"></td>
+        <td class="small muted">${esc(p.unit)}</td>
+        <td class="small">${p.source ? `<a href="${esc(p.source)}" target="_blank" rel="noopener">${esc(new URL(p.source).hostname)}</a>` : '<span class="muted">assumption</span>'}</td></tr>`).join("");
+  }
+  renderPlan(planState);
+}
+function renderPlan(r) {
+  $("#pricesChecked").textContent = r.prices_checked;
+  const c = r.capacity, best = r.stacks.find(s => s.key === r.recommended);
+  $("#planKpis").innerHTML = [
+    ["Emails per sending day", c.daily_emails.toLocaleString(), `${r.inputs.sending_days} weekdays / month`],
+    ["Inboxes", c.total_inboxes.toLocaleString(), `${c.active_inboxes.toLocaleString()} sending + ${(c.total_inboxes - c.active_inboxes).toLocaleString()} reserve`],
+    ["Domains", c.domains.toLocaleString(), `${c.domains_replaced_per_month} replaced / month`],
+    ["New leads / month", c.new_leads_per_month.toLocaleString(), "each verified once"],
+    ["Replies / month", c.replies_per_month.toLocaleString(), `${c.interested_per_month.toLocaleString()} interested`],
+    ["Recommended setup", money(best.total) + "/mo", `${cents(best.per_1k)} per 1k emails · ${cents(best.per_reply)} per reply`],
+  ].map(([l, v, s]) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="muted small">${s}</div></div>`).join("");
+  $("#stackTable").innerHTML = `<tr><th>Setup</th><th class="num">Per month</th><th class="num">Per 1k emails</th><th class="num">Per reply</th><th class="num">Per interested</th></tr>` +
+    r.stacks.map(s => `<tr class="${s.key === r.recommended ? "best" : ""}">
+      <td><b>${esc(s.name)}</b>${s.key === r.recommended ? ' <span class="chip ok">recommended</span>' : ""}
+        ${s.warmup_included ? "" : ' <span class="chip bad">warm-up not included</span>'}<div class="muted small">${esc(s.notes)}</div></td>
+      <td class="num"><b>${money(s.total)}</b></td><td class="num">${cents(s.per_1k)}</td><td class="num">${cents(s.per_reply)}</td><td class="num">${cents(s.per_interested)}</td></tr>`).join("");
+  const comps = [...new Set(r.stacks.flatMap(s => Object.keys(s.components)))];
+  chart("stackChart", {type: "bar", data: {labels: r.stacks.map(s => s.name.replace(/\(.*?\)/g, "").split(" + ").slice(0, 2).join(" + ")),
+    datasets: comps.map(k => ({label: k.replace("_", " "), data: r.stacks.map(s => s.components[k] ?? 0), backgroundColor: css(COMP_COLORS[k] ?? "--muted")}))},
+    options: {indexAxis: "y", maintainAspectRatio: false, plugins: {legend: {position: "bottom"}}, scales: {x: {stacked: true, ticks: {callback: v => "$" + (v / 1000) + "k"}}, y: {stacked: true}},
+}});
+  charts.stackChart.options.plugins.tooltip = {callbacks: {label: ctx => `${ctx.dataset.label}: ${money(ctx.raw)}`}};
+  charts.stackChart.update();
+  $("#sensTable").innerHTML = `<tr><th>Sends / inbox / day</th><th class="num">Inboxes</th><th class="num">Domains</th><th class="num">Monthly (recommended)</th><th class="num">Per 1k</th></tr>` +
+    r.sensitivity.map(x => `<tr class="${x.per_inbox_per_day === r.inputs.per_inbox_per_day ? "best" : ""}"><td>${x.per_inbox_per_day}</td>
+      <td class="num">${x.total_inboxes.toLocaleString()}</td><td class="num">${x.domains.toLocaleString()}</td>
+      <td class="num">${money(x.monthly)}</td><td class="num">${cents(x.per_1k)}</td></tr>`).join("");
+  $("#rampText").textContent = `Ramp: buy domains + inboxes in week 1, warm up for ${r.inputs.warmup_weeks} weeks, then cold volume goes 50% → 100% over 2 weeks: full volume in about ${c.weeks_to_full_volume} weeks. Reserve inboxes must keep warming in the background so replacements are ready.`;
+  const b = r.build_vs_buy;
+  $("#bvb").innerHTML = `<p>Building the sending layer in-house costs <b>${money(b.inhouse)}/mo</b> vs <b>${money(b.hybrid)}/mo</b> on Instantly with a hybrid inbox mix: <b>${(b.inhouse / b.hybrid).toFixed(1)}×</b> more.</p>
+    <p>The gap is warm-up: <b>${money(b.warmup_alone)}/mo</b> to warm ${c.total_inboxes.toLocaleString()} inboxes with a standalone tool. Instantly and Smartlead include unlimited warm-up through a network of millions of real inboxes, which nobody can rebuild alone.</p>
+    <p class="muted small">So: rent sending, rotation and warm-up; own the parts that are specific to this business: lead data and hygiene, compliance across SMS + email, multi-channel sequencing and reply routing. This prototype plugs into Instantly that way (POST /api/integrations/instantly/push, /webhooks/instantly).</p>`;
+}
+function replan() {
+  clearTimeout(planTimer);
+  planTimer = setTimeout(async () => {
+    const inputs = {}, prices = {};
+    document.querySelectorAll("[data-plan]").forEach(el => { if (el.value !== "") inputs[el.dataset.plan] = +el.value / +el.dataset.mult; });
+    document.querySelectorAll("[data-price]").forEach(el => { if (el.value !== "") prices[el.dataset.price] = +el.value; });
+    try { planState = {...await api("/api/planner", {method: "POST", body: {inputs, prices}}), _keep: true}; renderPlan(planState); }
+    catch (e) { toast(e.message); }
+  }, 250);
+}
+$("#scale").addEventListener("input", e => { if (e.target.dataset.plan || e.target.dataset.price) replan(); });
+
 // ---------------------------------------------------------------- compliance
 async function loadSup() {
   const s = await api("/api/suppressions");
@@ -607,7 +712,7 @@ $("#sp-go").onclick = async () => {
 };
 
 // ---------------------------------------------------------------- shell
-const loaders = {overview: loadOverview, campaigns: loadCampaigns, lines: loadLines, email: loadEmail, inbox: loadInbox, dialer: loadCalls, compliance: loadSup};
+const loaders = {overview: loadOverview, campaigns: loadCampaigns, scale: loadScale, lines: loadLines, email: loadEmail, inbox: loadInbox, dialer: loadCalls, compliance: loadSup};
 let tab = "overview";
 $("#nav").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;

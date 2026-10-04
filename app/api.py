@@ -16,7 +16,7 @@ from app.db import get_db
 from app.models import (CallLog, Campaign, Domain, Enrollment, HealthSnapshot, Lead, Mailbox, MailboxDailyStat,
                         Message, PhoneNumber, Suppression, utcnow)
 from app.services import (campaigns, compliance, domain_health, email_auth, email_sender, email_verify,
-                          line_health, provisioning, simulation, sms, warmup)
+                          line_health, provisioning, scale_planner, simulation, sms, warmup)
 from app.services.dialer import run_session
 
 api = APIRouter(prefix="/api")
@@ -650,3 +650,53 @@ def unsubscribe(token: str, db: Session = Depends(get_db)):
     enrollment_events.on_inbound(db, "stop", email=email)
     db.commit()
     return _unsub_page("You're unsubscribed", f"{email} won't receive any more emails from {settings.company_name}.")
+
+
+# ------------------------------------------------------------------ scale & unit economics
+
+class PlanIn(BaseModel):
+    inputs: dict[str, float] = {}
+    prices: dict[str, float] = {}
+
+
+@api.get("/planner")
+def planner_defaults():
+    return scale_planner.plan()
+
+
+@api.post("/planner")
+def planner(body: PlanIn):
+    try:
+        return scale_planner.plan(body.inputs, body.prices)
+    except (ValueError, ZeroDivisionError, TypeError) as e:
+        raise HTTPException(422, f"invalid planner input: {e}")
+
+
+# ------------------------------------------------------------------ Instantly integration
+
+class InstantlyPushIn(BaseModel):
+    campaign_id: int                   # our campaign whose active leads should be handed to Instantly
+    instantly_campaign_id: str
+    limit: int = Field(500, ge=1, le=10_000)
+
+
+@api.post("/integrations/instantly/push")
+def instantly_push(body: InstantlyPushIn, db: Session = Depends(get_db)):
+    from app.providers.instantly import InstantlyClient, push_leads
+    if not settings.instantly_api_key:
+        raise HTTPException(400, "set INSTANTLY_API_KEY to use the Instantly integration")
+    leads = list(db.scalars(select(Lead).join(Enrollment, Enrollment.lead_id == Lead.id).where(
+        Enrollment.campaign_id == body.campaign_id, Enrollment.status == "active").limit(body.limit)))
+    res = push_leads(db, InstantlyClient(settings.instantly_api_key), body.instantly_campaign_id, leads)
+    return {"pushed": res.pushed, "skipped": res.skipped}
+
+
+@webhooks.post("/instantly")
+async def instantly_webhook(request: Request, db: Session = Depends(get_db)):
+    """Instantly webhook target. Auth with X-Webhook-Secret header or ?secret= (set WEBHOOK_SECRET)."""
+    from app.providers.instantly import handle_webhook
+    if settings.webhook_secret:
+        given = request.headers.get("X-Webhook-Secret") or request.query_params.get("secret", "")
+        if not hmac.compare_digest(given, settings.webhook_secret):
+            raise HTTPException(403, "invalid webhook secret")
+    return handle_webhook(db, await request.json())
