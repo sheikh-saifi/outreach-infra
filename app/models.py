@@ -70,8 +70,11 @@ class Lead(Base):
     email: Mapped[str | None] = mapped_column(String(255), index=True)
     property_address: Mapped[str | None] = mapped_column(String(255))
     timezone: Mapped[str | None] = mapped_column(String(64))
-    # Number this lead was first contacted from; reused so the conversation stays on one thread.
+    # Number / mailbox this lead was first contacted from; reused so the conversation stays on one thread.
     sticky_number_id: Mapped[int | None] = mapped_column(ForeignKey("phone_numbers.id"))
+    sticky_mailbox_id: Mapped[int | None] = mapped_column(ForeignKey("mailboxes.id"))
+    phone_type: Mapped[str | None] = mapped_column(String(16))    # mobile | landline | voip | invalid (cached lookup)
+    email_status: Mapped[str | None] = mapped_column(String(16))  # valid | risky | invalid (cached verification)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -97,9 +100,16 @@ class Message(Base):
     direction: Mapped[str] = mapped_column(String(8))  # outbound | inbound
     from_addr: Mapped[str] = mapped_column(String(255))
     to_addr: Mapped[str] = mapped_column(String(255), index=True)
+    subject: Mapped[str | None] = mapped_column(String(255))
     body: Mapped[str] = mapped_column(Text)
-    # queued | sent | delivered | failed | filtered | received | blocked
+    # sms: sent | delivered | failed | filtered | received | blocked
+    # email: sent | bounced | failed | received | blocked
     status: Mapped[str] = mapped_column(String(16), index=True)
+    # Inbound email classification: reply | auto_reply | bounce | complaint. Only "reply" is a human answer.
+    kind: Mapped[str | None] = mapped_column(String(16))
+    message_id_hdr: Mapped[str | None] = mapped_column(String(255), index=True)  # RFC 5322 Message-ID
+    in_reply_to: Mapped[str | None] = mapped_column(String(255))
+    enrollment_id: Mapped[int | None] = mapped_column(ForeignKey("enrollments.id"), index=True)
     error_code: Mapped[str | None] = mapped_column(String(16))
     block_reason: Mapped[str | None] = mapped_column(String(128))  # why compliance stopped the send
     is_auto_reply: Mapped[bool] = mapped_column(Boolean, default=False)  # STOP/START confirmations
@@ -140,6 +150,11 @@ class Domain(Base):
     dmarc_policy: Mapped[str | None] = mapped_column(String(16))
     last_checked: Mapped[datetime | None] = mapped_column(DateTime)
     notes: Mapped[str | None] = mapped_column(Text)
+    # active | paused. A paused domain sends no cold email from any of its mailboxes.
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    status_reason: Mapped[str | None] = mapped_column(String(255))
+    blacklists: Mapped[str | None] = mapped_column(Text)  # JSON: {"dbl.spamhaus.org": true/false/null}
+    blacklist_checked: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class Mailbox(Base):
@@ -151,7 +166,9 @@ class Mailbox(Base):
     # warming | active | paused
     status: Mapped[str] = mapped_column(String(16), default="warming")
     status_reason: Mapped[str | None] = mapped_column(String(255))
+    display_name: Mapped[str] = mapped_column(String(64), default="Sam Carter")
     warmup_started: Mapped[date] = mapped_column(Date)
+    daily_cold_cap: Mapped[int] = mapped_column(Integer, default=30)  # cold emails/day once fully warm
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     domain: Mapped[Domain] = relationship()
@@ -164,9 +181,58 @@ class MailboxDailyStat(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     mailbox_id: Mapped[int] = mapped_column(ForeignKey("mailboxes.id"), index=True)
     day: Mapped[date] = mapped_column(Date)
-    planned: Mapped[int] = mapped_column(Integer, default=0)
-    sent: Mapped[int] = mapped_column(Integer, default=0)
+    planned: Mapped[int] = mapped_column(Integer, default=0)  # warm-up volume planned for the day
+    sent: Mapped[int] = mapped_column(Integer, default=0)     # warm-up emails sent
+    cold_sent: Mapped[int] = mapped_column(Integer, default=0)  # campaign emails sent
     bounces: Mapped[int] = mapped_column(Integer, default=0)
     complaints: Mapped[int] = mapped_column(Integer, default=0)
     replies: Mapped[int] = mapped_column(Integer, default=0)
     inbox_placement: Mapped[float | None] = mapped_column(Float)  # seed-test result, 0..1
+
+
+# ---------------------------------------------------------------- campaigns / sequences
+
+class Campaign(Base):
+    """A multi-step outreach sequence (any mix of SMS and email steps)."""
+    __tablename__ = "campaigns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft | active | paused
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    steps: Mapped[list["CampaignStep"]] = relationship(order_by="CampaignStep.position",
+                                                        cascade="all, delete-orphan")
+
+
+class CampaignStep(Base):
+    __tablename__ = "campaign_steps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    channel: Mapped[str] = mapped_column(String(16))  # sms | email
+    delay_days: Mapped[int] = mapped_column(Integer, default=0)  # wait after the previous step
+    subject: Mapped[str | None] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text)
+
+
+class Enrollment(Base):
+    """One lead's progress through one campaign. The dispatcher advances it step by step."""
+    __tablename__ = "enrollments"
+    __table_args__ = (UniqueConstraint("campaign_id", "lead_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id"), index=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
+    # active | replied | completed | stopped
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    stop_reason: Mapped[str | None] = mapped_column(String(128))
+    current_step: Mapped[int] = mapped_column(Integer, default=0)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    last_note: Mapped[str | None] = mapped_column(String(128))  # e.g. "deferred: outside 8am-9pm"
+    last_email_message_id: Mapped[int | None] = mapped_column(Integer)  # to thread follow-up emails
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    lead: Mapped[Lead] = relationship()
+    campaign: Mapped[Campaign] = relationship()

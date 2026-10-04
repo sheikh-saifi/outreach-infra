@@ -30,9 +30,9 @@ Email is the cheapest channel, and setup takes the longest (warm-up), so it star
 | DNS checker ✅ | Live MX, SPF (10-lookup limit), DKIM selectors, and DMARC checks. Add automated nightly re-checks and alerts. |
 | Mailbox provisioning | Google Workspace or Microsoft 365 via their admin APIs: 2–3 inboxes per domain, with real names, photos, and signatures. |
 | Warm-up ✅ (scheduler) | Ramp 5→40/day over 28 days. Next: connect to a warm-up network (Instantly, Smartlead, Mailreach) or a self-hosted peer pool. |
-| Sending engine | SMTP/OAuth sending with per-mailbox daily caps, randomized send intervals within business hours, one-click unsubscribe headers (RFC 8058, required by Gmail and Yahoo since 2024), and a physical address (CAN-SPAM). |
-| Monitoring | Google Postmaster Tools API, Microsoft SNDS, blacklist checks (Spamhaus, Barracuda), seed-list inbox-placement tests, and bounce classification (hard vs soft). |
-| Inbox management | IMAP/Graph sync of all mailboxes into the unified inbox. Detect replies, out-of-office messages, and bounces. Pause the sequence on reply. |
+| Sending engine ✅ | Warm-up-aware per-mailbox quotas, 6-minute pacing, random send times inside a weekday business-hours window, follow-ups threaded from the same mailbox, RFC 8058 one-click unsubscribe, and a CAN-SPAM footer. SMTP adapter built. Next: Gmail API / Microsoft Graph OAuth adapters. |
+| Monitoring ✅ (partial) | Built: domain blacklist checks (Spamhaus DBL, SURBL, URIBL), hard/soft bounce classification, complaint (ARF) handling, automatic mailbox and domain pauses. Next: Google Postmaster Tools API, Microsoft SNDS, seed-list inbox-placement tests. |
+| Inbox management ✅ (processing) | Built: classification of replies, out-of-office messages, bounces, and complaints; threading by `In-Reply-To`; sequences stop on reply; email replies sent from the inbox. Next: a poller per mailbox (Gmail watch, Graph subscriptions, IMAP IDLE) feeding `/webhooks/email/inbound`. |
 
 **Exit:** 20+ warmed mailboxes, sustained >90% inbox placement, <2% bounce rate, and spam complaints under 0.1% (Gmail's hard limit is 0.3%).
 
@@ -42,11 +42,11 @@ Email is the cheapest channel, and setup takes the longest (warm-up), so it star
 |---|---|
 | Carrier registration | **A2P 10DLC** brand plus campaign registration (unregistered traffic is blocked). Use toll-free verification as a second path. Expect 1–3 weeks of approval time; start this in week 1. |
 | Line provisioning ✅ | Buy by area code, assign to a campaign, retire, replace. Next: attach numbers to Messaging Services, auto-replenish pools nightly, and choose carriers per region. |
-| SMS engine ✅ | Sticky sender, local presence, per-line daily caps, templating. Next: a durable queue (Redis + workers), retries, per-carrier throughput limits (10DLC sets messages-per-second limits per trust score). |
+| SMS engine ✅ | Multi-step campaigns with a dispatcher that defers instead of dropping, sticky sender, local presence, per-line daily caps and pacing, and random send times. Next: a durable queue (Redis + workers) and per-carrier throughput limits (10DLC sets messages-per-second limits per trust score). |
 | Delivery webhooks ✅ | Status callbacks update each message. Signature verification is in place. |
 | Line health ✅ | Score built from filter rate, opt-outs, spam label, and replies, with automatic rest and quarantine. Next: per-carrier breakdowns (T-Mobile and AT&T filter differently) and alerting. |
-| Spam monitoring | Daily reputation lookups via Hiya, TNS, or First Orion. Register numbers with Free Caller Registry. Add a content linter that flags URL shorteners, ALL CAPS, and missing opt-out language before a campaign launches. |
-| Lead hygiene | Line-type lookup before sending (skip landlines; this saves money and protects the filter rate), National DNC + state DNC + litigator list scrubbing, and reassigned-number database checks. |
+| Spam monitoring | Daily reputation lookups via Hiya, TNS, or First Orion (job built; vendor adapter next). Register numbers with Free Caller Registry. Content linter ✅: shorteners, opt-out wording, SHAFT content, GSM-7/UCS-2 segments, spammy phrases. |
+| Lead hygiene | Built ✅: line-type lookup (landlines skip SMS), email verification (syntax, typos, disposable providers, MX, role accounts). Next: National DNC + state DNC + litigator list scrubbing, reassigned-number database checks, SMTP-level mailbox verification. |
 
 **Exit:** a registered 10DLC campaign, >95% delivery, <1% filtering, <2% opt-out, and automatic rotation running unattended for 2 weeks.
 

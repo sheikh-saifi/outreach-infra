@@ -10,19 +10,35 @@ Automated sends stop for any lead who has replied: from then on a human owns the
 in the inbox. Following up a "who is this?" with a canned template is how you earn complaints.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import Lead, Message, PhoneNumber, Suppression, utcnow
 from app.providers import get_carrier
-from app.services import compliance
+from app.services import compliance, enrollment_events
 from app.services.line_health import calls_today_by_line, sent_today_by_line
 
 
 class NoLineAvailable(Exception):
     pass
+
+
+class LineBusy(Exception):
+    """Lines have capacity left today but all sent too recently. Try again at `retry_at`."""
+    def __init__(self, retry_at: datetime):
+        super().__init__(f"all lines pacing until {retry_at}")
+        self.retry_at = retry_at
+
+
+def last_sent_by_line(db: Session, now: datetime) -> dict[int, datetime]:
+    rows = db.execute(select(Message.number_id, func.max(Message.created_at)).where(
+        Message.direction == "outbound", Message.channel == "sms", Message.status != "blocked",
+        Message.is_auto_reply.is_(False), Message.created_at > now - timedelta(hours=1),
+        Message.created_at <= now, Message.number_id.is_not(None)).group_by(Message.number_id)).all()
+    return {k: v for k, v in rows}
 
 
 def render(template: str, lead: Lead) -> str:
@@ -31,7 +47,8 @@ def render(template: str, lead: Lead) -> str:
 
 
 def pick_number(db: Session, lead: Lead, campaign: str | None = None, now: datetime | None = None,
-                channel: str = "sms") -> PhoneNumber:
+                channel: str = "sms", pace: bool = False) -> PhoneNumber:
+    """`pace=True` (automated texts) also skips lines that sent within `sms_min_gap_seconds`."""
     if channel == "voice":
         sent = calls_today_by_line(db, now)
         cap = lambda n: n.daily_call_cap  # noqa: E731
@@ -39,8 +56,17 @@ def pick_number(db: Session, lead: Lead, campaign: str | None = None, now: datet
         sent = sent_today_by_line(db, now)
         cap = lambda n: n.daily_cap  # noqa: E731
 
+    gap = timedelta(seconds=settings.sms_min_gap_seconds)
+    last = last_sent_by_line(db, now or utcnow()) if pace and gap else {}
+    busy_until: list[datetime] = []
+
     def usable(n: PhoneNumber | None) -> bool:
-        return bool(n) and n.status == "active" and sent.get(n.id, 0) < cap(n)
+        if not (n and n.status == "active" and sent.get(n.id, 0) < cap(n)):
+            return False
+        if n.id in last and last[n.id] + gap > (now or utcnow()):
+            busy_until.append(last[n.id] + gap)
+            return False
+        return True
 
     if lead.sticky_number_id:
         sticky = db.get(PhoneNumber, lead.sticky_number_id)
@@ -59,13 +85,22 @@ def pick_number(db: Session, lead: Lead, campaign: str | None = None, now: datet
     for n in sorted(pool, key=rank, reverse=True):
         if usable(n):
             return n
+    if busy_until:
+        raise LineBusy(min(busy_until))
     raise NoLineAvailable("no active line with remaining daily capacity")
 
 
 def has_replied(db: Session, lead: Lead) -> bool:
-    """Checked by phone, not lead: an owner who replied about one property is in a conversation."""
-    return db.scalar(select(Message.id).where(Message.from_addr == lead.phone, Message.direction == "inbound")
-                     .limit(1)) is not None
+    """Has this person answered on any channel? Checked by phone and email, not lead id: an owner who
+    replied about one property is already in a conversation. Bounces and out-of-office replies
+    don't count."""
+    addrs = [a for a in (lead.phone, (lead.email or "").lower()) if a]
+    if not addrs:
+        return False
+    return db.scalar(select(Message.id).where(
+        Message.direction == "inbound", Message.from_addr.in_(addrs),
+        or_(Message.kind.is_(None), Message.kind == "reply"),
+    ).limit(1)) is not None
 
 
 def send(db: Session, lead: Lead, template: str, campaign: str | None = None,
@@ -84,7 +119,7 @@ def send(db: Session, lead: Lead, template: str, campaign: str | None = None,
         db.commit()
         return msg
 
-    number = pick_number(db, lead, campaign, now)
+    number = pick_number(db, lead, campaign, now, pace=automated)
     result = get_carrier().send_sms(number.e164, lead.phone, body)
     msg = Message(channel="sms", direction="outbound", from_addr=number.e164, to_addr=lead.phone, body=body,
                   status=result.status, error_code=result.error_code, provider_sid=result.provider_sid,
@@ -122,6 +157,9 @@ def handle_inbound(db: Session, from_raw: str, to_raw: str, body: str, now: date
                    lead_id=lead.id if lead else None, created_at=now))
 
     keyword = compliance.classify_keyword(body)
+    # Any inbound text ends this person's automated sequences right away.
+    enrollment_events.on_inbound(db, keyword if keyword in ("stop", "wrong_number") else "reply",
+                                 phone=sender, email=lead.email if lead else None)
     reply = None
     if keyword in ("stop", "wrong_number"):
         already = compliance.is_suppressed(db, sender, "sms")

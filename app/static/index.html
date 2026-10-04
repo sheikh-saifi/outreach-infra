@@ -70,6 +70,22 @@
            border-radius: 10px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 420px; }
   .toast.show { opacity: 1; }
   canvas { max-height: 260px; }
+  .stack { display: grid; gap: 14px; align-content: start; }
+  .camp { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; }
+  .camp .top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pipeline { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--chip); }
+  .pipeline i { display: block; height: 100%; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .legend b { color: var(--ink); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .step { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 8px; }
+  .step .body { white-space: pre-wrap; font-size: 13px; }
+  .issues { display: grid; gap: 4px; font-size: 12px; }
+  .issue.error { color: var(--bad); } .issue.warning { color: var(--warn); }
+  textarea { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+             color: var(--ink); width: 100%; min-height: 84px; resize: vertical; }
+  .full { width: 100%; }
+  .msg .subj { font-weight: 600; margin-bottom: 2px; }
 </style>
 </head>
 <body>
@@ -78,6 +94,7 @@
   <span class="provider" id="provider"></span>
   <nav id="nav">
     <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="campaigns">Campaigns</button>
     <button data-tab="lines">Phone lines</button>
     <button data-tab="email">Email</button>
     <button data-tab="inbox">Inbox</button>
@@ -85,7 +102,7 @@
     <button data-tab="compliance">Compliance</button>
   </nav>
   <span class="spacer"></span>
-  <button class="btn" id="tick" title="Send a live batch through the mock carrier and re-run health checks">Simulate traffic</button>
+  <button class="btn" id="tick" title="New leads arrive, get enrolled in the active campaigns, and the dispatcher runs now">Simulate traffic</button>
 </header>
 
 <main>
@@ -95,6 +112,50 @@
     <div class="grid two">
       <div class="card"><h2>SMS outcomes · last 7 days</h2><canvas id="smsChart"></canvas></div>
       <div class="card"><h2>Calls · last 7 days</h2><canvas id="callChart"></canvas></div>
+    </div>
+    <div class="grid two" style="margin-top:14px">
+      <div class="card"><h2>Email outcomes · last 7 days</h2><canvas id="emailChart"></canvas></div>
+      <div class="card"><h2>Campaign pipeline</h2><canvas id="pipeChart"></canvas></div>
+    </div>
+  </section>
+
+  <!-- CAMPAIGNS -->
+  <section id="campaigns">
+    <div class="grid two" style="margin-bottom:14px">
+      <div class="card"><h2>Campaigns</h2><div class="stack" id="campList"></div></div>
+      <div class="card">
+        <h2>Background jobs</h2>
+        <div class="scroll"><table id="jobsTable"></table></div>
+        <div class="row" style="margin-top:10px"><button class="btn ghost" id="dispatchGo">Run dispatcher now</button></div>
+        <pre class="out" id="dispatchOut" hidden></pre>
+      </div>
+    </div>
+    <div class="card" id="campDetail" hidden style="margin-bottom:14px">
+      <h2 id="campTitle"></h2>
+      <div class="grid two">
+        <div class="stack" id="campSteps"></div>
+        <div>
+          <div class="row" style="margin-bottom:8px">
+            <select id="enrFilter"><option value="">All leads</option><option>active</option><option>replied</option>
+              <option>completed</option><option>stopped</option></select>
+          </div>
+          <div class="scroll"><table id="enrTable"></table></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>New campaign</h2>
+      <div class="stack">
+        <input id="ncName" placeholder="Campaign name" class="full">
+        <div class="stack" id="ncSteps"></div>
+        <div class="row">
+          <button class="btn ghost" id="ncAddSms">+ SMS step</button>
+          <button class="btn ghost" id="ncAddEmail">+ Email step</button>
+          <span class="spacer"></span>
+          <span class="muted small">Merge fields: {first_name} {address}</span>
+          <button class="btn" id="ncCreate">Create campaign</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -128,6 +189,12 @@
         <span class="muted small">Runs live DNS lookups.</span>
       </div>
       <pre class="out" id="dom-out" hidden></pre>
+      <div class="row" style="margin-top:12px">
+        <strong>Verify an address</strong>
+        <input id="ver-in" placeholder="owner@example.com" size="28">
+        <button class="btn ghost" id="ver-go">Verify</button>
+        <span class="small" id="ver-out"></span>
+      </div>
     </div>
     <div class="card scroll" style="margin-bottom:14px"><h2>Sending domains</h2><table id="domTable"></table></div>
     <div class="grid two">
@@ -145,7 +212,8 @@
         <div class="muted small" id="thSub"></div>
         <div class="msgs" id="msgs"></div>
         <div class="row" style="margin-top:12px" id="replyRow" hidden>
-          <input id="replyIn" placeholder="Reply via SMS…" style="flex:1">
+          <select id="replyCh"><option value="sms">SMS</option><option value="email">Email</option></select>
+          <input id="replyIn" placeholder="Write a reply…" style="flex:1">
           <button class="btn" id="replyGo">Send</button>
         </div>
       </div>
@@ -218,7 +286,7 @@ const yes = b => b ? `<span class="chip ok">pass</span>` : `<span class="chip ba
 // ---------------------------------------------------------------- overview
 async function loadOverview() {
   const o = await api("/api/overview");
-  $("#provider").textContent = `provider: ${o.provider}`;
+  $("#provider").textContent = `sms/voice: ${o.provider} · email: ${o.email_provider}`;
   const L = o.lines, S = o.sms_7d, M = o.mailboxes;
   const calls = Object.values(o.calls_7d).reduce((a, b) => a + b, 0);
   const k = [
@@ -228,6 +296,9 @@ async function loadOverview() {
     ["Replies (7d)", S.replies, `${S.optouts} opt-outs · ${S.wrong_numbers} wrong numbers`],
     ["Calls (7d)", calls, `${o.calls_7d.answered ?? 0} answered`],
     ["Mailboxes", Object.values(M).reduce((a, b) => a + b, 0), `${M.warming ?? 0} warming · ${M.paused ?? 0} paused`],
+    ["Emails sent (7d)", o.email_7d.sent, `bounce rate ${pct(o.email_7d.bounce_rate)}`],
+    ["Email replies (7d)", o.email_7d.replies, `reply rate ${pct(o.email_7d.reply_rate)} · ${o.email_7d.complaints} complaints`],
+    ["In sequences", o.enrollments.active ?? 0, `${o.enrollments.replied ?? 0} replied · ${o.enrollments.completed ?? 0} done`],
   ];
   $("#kpis").innerHTML = k.map(([l, v, s]) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="muted small">${s}</div></div>`).join("");
 
@@ -242,6 +313,14 @@ async function loadOverview() {
   const co = o.calls_7d, keys = Object.keys(co);
   chart("callChart", {type: "doughnut", data: {labels: keys, datasets: [{data: keys.map(x => co[x]),
     backgroundColor: keys.map(x => ({answered: css("--ok"), voicemail: css("--accent"), abandoned: css("--bad"), failed: css("--bad"), busy: css("--warn"), no_answer: css("--muted")}[x] ?? css("--chip")))}]},
+    options: {plugins: {legend: {position: "bottom"}}}});
+  chart("emailChart", {type: "bar", data: {labels: o.email_series.map(r => r.day.slice(5)), datasets: [
+    {label: "Sent", data: o.email_series.map(r => r.sent), backgroundColor: css("--accent")},
+    {label: "Bounced at send", data: o.email_series.map(r => r.bounced), backgroundColor: css("--bad")},
+  ]}, options: {scales: {x: {stacked: true}, y: {stacked: true}}}});
+  const E = o.enrollments, ek = ["active", "replied", "completed", "stopped"];
+  chart("pipeChart", {type: "doughnut", data: {labels: ek, datasets: [{data: ek.map(k => E[k] ?? 0),
+    backgroundColor: [css("--accent"), css("--ok"), css("--muted"), css("--bad")]}]},
     options: {plugins: {legend: {position: "bottom"}}}});
 }
 
@@ -291,16 +370,28 @@ $("#sweep-go").onclick = async () => { const r = await api("/api/monitor/health-
 let mailboxes = [];
 async function loadEmail() {
   const ds = await api("/api/email/domains");
-  $("#domTable").innerHTML = `<tr><th>Domain</th><th>MX</th><th>SPF</th><th>DKIM</th><th>DMARC</th><th>Issues</th></tr>` +
-    ds.map(d => `<tr><td><b>${esc(d.name)}</b><div class="muted small">checked ${when(d.last_checked)}</div></td><td>${yes(d.mx)}</td><td>${yes(d.spf)}</td><td>${yes(d.dkim)}</td>
+  const bl = d => {
+    if (!d.blacklists) return '<span class="muted small">not checked</span>';
+    const listed = Object.entries(d.blacklists).filter(([, v]) => v === true).map(([k]) => k);
+    const unknown = Object.values(d.blacklists).filter(v => v === null).length;
+    return listed.length ? `<span class="chip bad">listed: ${esc(listed.join(", "))}</span>`
+      : `<span class="chip ok">clean</span>${unknown ? ` <span class="muted small">${unknown} unreachable</span>` : ""}`;
+  };
+  $("#domTable").innerHTML = `<tr><th>Domain</th><th>Status</th><th>MX</th><th>SPF</th><th>DKIM</th><th>DMARC</th><th>Blacklists</th><th>7d sent / bounce</th><th>Issues</th></tr>` +
+    ds.map(d => `<tr><td><b>${esc(d.name)}</b><div class="muted small">checked ${when(d.last_checked)}</div></td>
+      <td>${statusChip(d.status)}<div class="muted small">${esc(d.status_reason ?? "")}</div></td>
+      <td>${yes(d.mx)}</td><td>${yes(d.spf)}</td><td>${yes(d.dkim)}</td>
       <td>${yes(d.dmarc)} <span class="muted small">${d.dmarc_policy ? "p=" + d.dmarc_policy : ""}</span></td>
+      <td>${bl(d)}<div><button class="btn ghost sm" data-bl="${d.id}" style="margin-top:4px">Check</button></div></td>
+      <td>${d.sent} / ${pct(d.bounce_rate)}</td>
       <td class="small">${d.issues.map(esc).join("<br>") || '<span class="muted">none</span>'}</td></tr>`).join("");
   mailboxes = await api("/api/email/mailboxes");
-  $("#mbTable").innerHTML = `<tr><th>Mailbox</th><th>Status</th><th>Day</th><th>Today's quota</th><th>Bounce 7d</th><th>Inbox placement</th><th></th></tr>` +
+  $("#mbTable").innerHTML = `<tr><th>Mailbox</th><th>Status</th><th>Warm-up day</th><th>Warm-up / day</th><th>Cold today</th><th>Bounce 7d</th><th>Inbox placement</th><th></th></tr>` +
     mailboxes.map((m, i) => `<tr>
-      <td><a href="#" data-mb="${i}">${esc(m.mailbox)}</a></td>
-      <td>${statusChip(m.status)}<div class="muted small">${esc(m.reason ?? "")}</div></td>
-      <td>${m.day}/${m.warmup_days}</td><td>${m.quota}</td><td>${pct(m.bounce_rate)}</td><td>${pct(m.inbox_placement)}</td>
+      <td><a href="#" data-mb="${i}">${esc(m.mailbox)}</a><div class="muted small">${esc(m.display_name)}</div></td>
+      <td>${statusChip(m.status)}<div class="muted small">${esc(m.reason ?? (m.domain_status === "paused" ? "domain paused" : ""))}</div></td>
+      <td>${m.day >= m.warmup_days ? '<span class="muted">complete</span>' : `${m.day}/${m.warmup_days}`}</td><td>${m.quota}</td>
+      <td>${m.cold_sent_today}/${m.cold_quota}</td><td>${pct(m.bounce_rate)}</td><td>${pct(m.inbox_placement)}</td>
       <td>${m.status === "paused" ? `<button class="btn ghost sm" data-resume="${m.id}">Resume</button>` : ""}</td></tr>`).join("");
   if (mailboxes.length) showMailbox(0);
 }
@@ -308,7 +399,8 @@ function showMailbox(i) {
   const m = mailboxes[i], s = m.series;
   $("#mbTitle").textContent = `Warm-up curve · ${m.mailbox}`;
   chart("mbChart", {type: "line", data: {labels: s.map(x => x.day.slice(5)), datasets: [
-    {label: "Sent", data: s.map(x => x.sent), borderColor: css("--accent"), backgroundColor: css("--accent"), tension: .2},
+    {label: "Warm-up", data: s.map(x => x.sent), borderColor: css("--accent"), backgroundColor: css("--accent"), tension: .2},
+    {label: "Campaign", data: s.map(x => x.cold_sent), borderColor: css("--warn"), backgroundColor: css("--warn"), tension: .2},
     {label: "Bounces", data: s.map(x => x.bounces), borderColor: css("--bad"), backgroundColor: css("--bad"), tension: .2},
     {label: "Inbox %", data: s.map(x => x.inbox_placement == null ? null : Math.round(x.inbox_placement * 100)), borderColor: css("--ok"), borderDash: [4, 4], tension: .2, yAxisID: "y1"},
   ]}, options: {scales: {y: {min: 0}, y1: {position: "right", min: 0, max: 100, grid: {drawOnChartArea: false}}, x: {ticks: {maxTicksLimit: 8}}}}});
@@ -317,6 +409,18 @@ $("#mbTable").addEventListener("click", async e => {
   if (e.target.dataset.mb) { e.preventDefault(); showMailbox(+e.target.dataset.mb); }
   if (e.target.dataset.resume) { await api(`/api/email/mailboxes/${e.target.dataset.resume}/resume`, {method: "POST"}); toast("Resumed; ramp stepped back one week"); loadEmail(); }
 });
+$("#domTable").addEventListener("click", async e => {
+  const id = e.target.dataset.bl; if (!id) return;
+  e.target.textContent = "Checking…";
+  const r = await api(`/api/email/domains/${id}/blacklists`, {method: "POST"});
+  toast(`${r.domain}: ${r.status}${r.reason ? " (" + r.reason + ")" : ""}`); loadEmail();
+});
+$("#ver-go").onclick = async () => {
+  $("#ver-out").textContent = "Checking…";
+  try { const r = await api("/api/email/verify", {method: "POST", body: {address: $("#ver-in").value}});
+        $("#ver-out").innerHTML = `<span class="chip ${r.status === "valid" ? "ok" : r.status === "risky" ? "warn" : "bad"}">${r.status}</span> ${esc(r.reason)}`;
+  } catch (e) { $("#ver-out").textContent = e.message; }
+};
 $("#dom-go").onclick = async () => {
   const out = $("#dom-out"); out.hidden = false; out.textContent = "Resolving…";
   try { const r = await api("/api/email/domains/check", {method: "POST", body: {domain: $("#dom-in").value}});
@@ -332,22 +436,28 @@ async function loadInbox() {
   const t = await api("/api/inbox");
   $("#threads").innerHTML = t.map(x => `<div class="thread-item ${x.lead_id === currentLead ? "sel" : ""}" data-lead="${x.lead_id}">
       <div class="n"><span>${esc(x.name)}</span><span class="muted small">${when(x.at)}</span></div>
-      <div class="p">${x.opted_out ? '<span class="chip bad">opted out</span> ' : ""}${x.unread ? '<span class="chip ok">new</span> ' : ""}${esc(x.last_message)}</div>
+      <div class="p"><span class="chip">${x.channel === "email" ? "Email" : "SMS"}</span> ${x.opted_out ? '<span class="chip bad">opted out</span> ' : ""}${x.unread ? '<span class="chip ok">new</span> ' : ""}${esc(x.subject ? x.subject + " · " : "")}${esc(x.last_message)}</div>
       <div class="p">${esc(x.address)}</div></div>`).join("") || `<p class="muted" style="padding:14px">No replies yet.</p>`;
 }
 async function openThread(id) {
   currentLead = id;
   const t = await api(`/api/inbox/${id}`);
   $("#thTitle").textContent = t.lead.name;
-  $("#thSub").textContent = `${t.lead.phone} · ${t.lead.address}`;
-  $("#msgs").innerHTML = t.messages.map(m => `<div class="msg ${m.direction === "outbound" ? "out" : "in"}">${esc(m.body)}
-    <div class="meta">${m.channel} · ${m.direction === "outbound" ? esc(m.status) + " · from " + esc(m.from) : "received"} · ${when(m.at)}</div></div>`).join("");
+  $("#thSub").textContent = [t.lead.phone, t.lead.email, t.lead.address].filter(Boolean).join(" · ");
+  const meta = m => m.direction === "outbound"
+    ? `${m.channel} · ${esc(m.status)}${m.block_reason ? " (" + esc(m.block_reason) + ")" : ""} · from ${esc(m.from)}`
+    : `${m.channel} · ${m.kind && m.kind !== "reply" ? esc(m.kind.replace("_", " ")) : "received"}`;
+  $("#msgs").innerHTML = t.messages.map(m => `<div class="msg ${m.direction === "outbound" ? "out" : "in"}">${m.subject ? `<div class="subj">${esc(m.subject)}</div>` : ""}${esc(m.body)}
+    <div class="meta">${meta(m)} · ${when(m.at)}</div></div>`).join("");
+  $("#replyCh").value = t.reply_channel;
+  $("#replyCh").querySelector('[value="email"]').disabled = !t.lead.email;
+  $("#replyCh").querySelector('[value="sms"]').disabled = !t.lead.phone;
   $("#msgs").scrollTop = 1e9; $("#replyRow").hidden = false; loadInbox();
 }
 $("#threads").addEventListener("click", e => { const el = e.target.closest("[data-lead]"); if (el) openThread(+el.dataset.lead); });
 $("#replyGo").onclick = async () => {
   const body = $("#replyIn").value.trim(); if (!body || !currentLead) return;
-  try { const r = await api(`/api/inbox/${currentLead}/reply`, {method: "POST", body: {body}});
+  try { const r = await api(`/api/inbox/${currentLead}/reply`, {method: "POST", body: {body, channel: $("#replyCh").value}});
         toast(r.status === "blocked" ? `Blocked: ${r.block_reason}` : `Sent (${r.status}) from ${r.from}`);
         $("#replyIn").value = ""; openThread(currentLead); } catch (e) { toast(e.message); }
 };
@@ -367,6 +477,122 @@ $("#dl-go").onclick = async () => {
   loadCalls();
 };
 
+// ---------------------------------------------------------------- campaigns
+const enrChip = st => `<span class="chip ${({active: "warn", replied: "ok", stopped: "bad"})[st] ?? ""}">${esc(st)}</span>`;
+const PIPE = [["active", "--accent"], ["replied", "--ok"], ["completed", "--muted"], ["stopped", "--bad"]];
+let campaignsCache = [], openCampaign = null;
+const issuesHtml = lint => {
+  const seg = lint.segments ? `<div class="muted small">${lint.segments.encoding} · ${lint.segments.length} chars · ${lint.segments.segments} segment${lint.segments.segments > 1 ? "s" : ""}</div>` : "";
+  const words = lint.words != null ? `<div class="muted small">${lint.words} words</div>` : "";
+  return seg + words + `<div class="issues">${lint.issues.map(i => `<div class="issue ${i.level}">${i.level === "error" ? "✕" : "!"} ${esc(i.message)}</div>`).join("")}</div>`;
+};
+async function loadCampaigns() {
+  campaignsCache = await api("/api/campaigns");
+  $("#campList").innerHTML = campaignsCache.map(c => {
+    const st = c.stats, total = st.enrolled || 1;
+    const errors = c.steps.some(s => s.lint.issues.some(i => i.level === "error"));
+    return `<div class="camp">
+      <div class="top"><b>${esc(c.name)}</b> ${statusChip(c.status === "active" ? "active" : c.status === "paused" ? "paused" : "draft")}
+        <span class="muted small">${c.steps.map(s => s.channel.toUpperCase() + (s.delay_days ? " +" + s.delay_days + "d" : "")).join(" → ")}</span>
+        ${errors ? '<span class="chip bad">content errors</span>' : ""}</div>
+      <div class="pipeline">${PIPE.map(([k, v]) => `<i style="width:${100 * (st[k] ?? 0) / total}%;background:${css(v)}"></i>`).join("")}</div>
+      <div class="legend"><span><b>${st.enrolled}</b> enrolled</span>${PIPE.map(([k, v]) => `<span><span class="dot" style="background:${css(v)}"></span><b>${st[k] ?? 0}</b> ${k}</span>`).join("")}
+        <span><b>${st.messages_sent}</b> messages · reply rate <b>${pct(st.reply_rate)}</b></span></div>
+      <div class="row">
+        <button class="btn ghost sm" data-copen="${c.id}">View</button>
+        ${c.status === "active" ? `<button class="btn ghost sm" data-cact="pause" data-id="${c.id}">Pause</button>`
+                                : `<button class="btn sm" data-cact="activate" data-id="${c.id}">Activate</button>`}
+        <button class="btn ghost sm" data-cact="enroll" data-id="${c.id}">Enroll 25 leads</button>
+      </div></div>`;
+  }).join("") || '<p class="muted">No campaigns yet.</p>';
+  loadJobs();
+  if (openCampaign) showCampaign(openCampaign);
+}
+async function showCampaign(id) {
+  openCampaign = id;
+  history.replaceState(null, "", `#campaigns/${id}`);
+  const c = campaignsCache.find(x => x.id === id); if (!c) return;
+  $("#campDetail").hidden = false;
+  $("#campTitle").textContent = c.name;
+  $("#campSteps").innerHTML = c.steps.map((s, i) => `<div class="step">
+      <div class="row"><span class="chip">${s.channel.toUpperCase()}</span><b>Step ${i + 1}</b><span class="muted small">${i === 0 ? "on enrollment" : "+" + s.delay_days + " days after step " + i}</span></div>
+      ${s.subject ? `<div><b>Subject:</b> ${esc(s.subject)}</div>` : ""}
+      <div class="body">${esc(s.body)}</div>${issuesHtml(s.lint)}</div>`).join("");
+  const rows = await api(`/api/campaigns/${id}/enrollments?limit=150${$("#enrFilter").value ? "&status=" + $("#enrFilter").value : ""}`);
+  $("#enrTable").innerHTML = `<tr><th>Lead</th><th>Status</th><th>Step</th><th>Next send</th><th>Note</th></tr>` +
+    rows.map(e => `<tr><td>${esc(e.lead)}</td><td>${enrChip(e.status)}</td>
+      <td>${e.step}</td><td class="small">${when(e.next_run_at)}</td><td class="small muted">${esc(e.stop_reason ?? e.note ?? "")}</td></tr>`).join("");
+}
+$("#enrFilter").onchange = () => openCampaign && showCampaign(openCampaign);
+$("#campList").addEventListener("click", async e => {
+  const t = e.target;
+  if (t.dataset.copen) return showCampaign(+t.dataset.copen);
+  if (!t.dataset.cact) return;
+  try {
+    if (t.dataset.cact === "enroll") { const r = await api(`/api/campaigns/${t.dataset.id}/enroll`, {method: "POST", body: {count: 25}}); toast(`Enrolled ${r.enrolled} leads`); }
+    else { const r = await api(`/api/campaigns/${t.dataset.id}/${t.dataset.cact}`, {method: "POST"}); toast(`Campaign ${r.status}`); }
+  } catch (err) { toast(err.message.includes("content errors") ? "Fix the content errors first (see View)" : err.message); }
+  loadCampaigns();
+});
+async function loadJobs() {
+  const s = await api("/api/scheduler");
+  $("#jobsTable").innerHTML = `<tr><th>Job</th><th>Every</th><th>Last run</th><th>Result</th><th></th></tr>` + s.jobs.map(j => `<tr>
+    <td><b>${j.name}</b><div class="muted small">${esc(j.description)}</div></td>
+    <td class="small">${j.every_s >= 3600 ? j.every_s / 3600 + "h" : j.every_s >= 60 ? j.every_s / 60 + "m" : j.every_s + "s"}</td>
+    <td class="small">${j.last_run ? when(j.last_run) : '<span class="muted">not yet</span>'}</td>
+    <td class="small ${j.last_error ? "issue error" : ""}">${esc(j.last_error ?? j.last_result ?? "")}</td>
+    <td><button class="btn ghost sm" data-job="${j.name}">Run</button></td></tr>`).join("") +
+    (s.running ? "" : '<tr><td colspan="5" class="small muted">Scheduler is off (ENABLE_SCHEDULER=false). Jobs only run when triggered.</td></tr>');
+}
+$("#jobsTable").addEventListener("click", async e => {
+  const name = e.target.dataset.job; if (!name) return;
+  e.target.textContent = "…"; const r = await api(`/api/scheduler/${name}/run`, {method: "POST"});
+  toast(`${r.name}: ${r.error ?? r.result}`); loadCampaigns();
+});
+$("#dispatchGo").onclick = async () => {
+  const r = await api("/api/dispatch/run", {method: "POST"});
+  const out = $("#dispatchOut"); out.hidden = false;
+  out.textContent = `Due ${r.due} · sent ${r.sent} · deferred ${r.deferred} · skipped ${r.skipped} · stopped ${r.stopped} · completed ${r.completed}` +
+    (Object.keys(r.reasons).length ? "\n" + Object.entries(r.reasons).map(([k, v]) => `  ${v}× ${k}`).join("\n") : "");
+  loadCampaigns();
+};
+
+// new-campaign editor with live linting
+const ncSteps = [];
+function stepEditor(i) {
+  const st = ncSteps[i];
+  return `<div class="step" data-i="${i}">
+    <div class="row"><span class="chip">${st.channel.toUpperCase()}</span><b>Step ${i + 1}</b>
+      ${i ? `<label class="muted small">wait</label><input type="number" min="0" max="60" value="${st.delay_days}" data-f="delay_days" style="width:70px"><span class="muted small">days</span>` : '<span class="muted small">sent on enrollment</span>'}
+      <span class="spacer"></span><button class="btn ghost sm" data-del="${i}">Remove</button></div>
+    ${st.channel === "email" ? `<input placeholder="Subject" data-f="subject" value="${esc(st.subject ?? "")}" class="full">` : ""}
+    <textarea data-f="body" placeholder="${st.channel === "sms" ? "Hi {first_name}, ... Reply STOP to opt out." : "Hi {first_name}, ..."}">${esc(st.body)}</textarea>
+    <div data-lint></div></div>`;
+}
+function renderSteps() { $("#ncSteps").innerHTML = ncSteps.map((_, i) => stepEditor(i)).join(""); lintDraft(); }
+let lintTimer;
+function lintDraft() {
+  clearTimeout(lintTimer);
+  lintTimer = setTimeout(async () => {
+    if (!ncSteps.length) return;
+    const res = await api("/api/campaigns/lint", {method: "POST", body: {name: "draft", steps: ncSteps}}).catch(() => null);
+    if (!res) return;
+    res.forEach((r, i) => { const el = document.querySelector(`#ncSteps [data-i="${i}"] [data-lint]`); if (el) el.innerHTML = issuesHtml(r); });
+  }, 300);
+}
+$("#ncSteps").addEventListener("input", e => {
+  const box = e.target.closest("[data-i]"), f = e.target.dataset.f; if (!box || !f) return;
+  ncSteps[+box.dataset.i][f] = f === "delay_days" ? +e.target.value : e.target.value; lintDraft();
+});
+$("#ncSteps").addEventListener("click", e => { if (e.target.dataset.del != null) { ncSteps.splice(+e.target.dataset.del, 1); renderSteps(); } });
+$("#ncAddSms").onclick = () => { ncSteps.push({channel: "sms", delay_days: ncSteps.length ? 2 : 0, body: ""}); renderSteps(); };
+$("#ncAddEmail").onclick = () => { ncSteps.push({channel: "email", delay_days: ncSteps.length ? 3 : 0, subject: "", body: ""}); renderSteps(); };
+$("#ncCreate").onclick = async () => {
+  try { const c = await api("/api/campaigns", {method: "POST", body: {name: $("#ncName").value || "Untitled", steps: ncSteps}});
+        toast(`Created "${c.name}" as a draft. Activate it when the content checks pass.`);
+        ncSteps.length = 0; $("#ncName").value = ""; renderSteps(); loadCampaigns(); } catch (e) { toast(e.message); }
+};
+
 // ---------------------------------------------------------------- compliance
 async function loadSup() {
   const s = await api("/api/suppressions");
@@ -379,7 +605,7 @@ $("#sp-go").onclick = async () => {
 };
 
 // ---------------------------------------------------------------- shell
-const loaders = {overview: loadOverview, lines: loadLines, email: loadEmail, inbox: loadInbox, dialer: loadCalls, compliance: loadSup};
+const loaders = {overview: loadOverview, campaigns: loadCampaigns, lines: loadLines, email: loadEmail, inbox: loadInbox, dialer: loadCalls, compliance: loadSup};
 let tab = "overview";
 $("#nav").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
@@ -390,11 +616,16 @@ $("#nav").addEventListener("click", e => {
 });
 $("#tick").onclick = async () => {
   try { const r = await api("/api/simulate/tick", {method: "POST"});
-        const s = Object.entries(r.sent).map(([k, v]) => `${v} ${k}`).join(", ");
-        toast(`Batch: ${s} · ${r.replies} replies` + (r.health_actions.length ? ` · ${r.health_actions.map(a => a.number + " " + a.action).join(", ")}` : ""));
+        const d = r.dispatch, why = Object.entries(d.reasons).map(([k, v]) => `${v}× ${k}`).join(", ");
+        toast(`${r.new_leads} new leads enrolled · sent ${d.sent} now` + (d.skipped ? ` · skipped ${d.skipped}` : "") + (why ? ` (${why})` : "") +
+              (r.scheduled_later ? ` · ${r.scheduled_later} steps waiting for the recipient's sending window (next ${when(r.next_send_at)})` : "") +
+              (r.health_actions.length ? ` · ${r.health_actions.map(a => a.number + " " + a.action).join(", ")}` : ""));
         loaders[tab](); } catch (e) { toast(e.message); }
 };
-const initial = document.querySelector(`#nav button[data-tab="${location.hash.slice(1)}"]`);
+// Deep links: #lines, #campaigns, #campaigns/2 (opens that campaign)
+const [hashTab, hashId] = location.hash.slice(1).split("/");
+if (hashId) openCampaign = +hashId;
+const initial = document.querySelector(`#nav button[data-tab="${hashTab}"]`);
 initial ? initial.click() : loadOverview();
 </script>
 </body>

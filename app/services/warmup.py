@@ -34,7 +34,8 @@ def trailing_rates(db: Session, mailbox: Mailbox, today: date, days: int = 7) ->
         MailboxDailyStat.mailbox_id == mailbox.id,
         MailboxDailyStat.day > today - timedelta(days=days), MailboxDailyStat.day <= today,
     )).all()
-    sent = sum(r.sent for r in rows)
+    # Warm-up and campaign mail both count: a bad lead list bounces regardless of why we sent.
+    sent = sum(r.sent + (r.cold_sent or 0) for r in rows)
     placements = [r.inbox_placement for r in rows if r.inbox_placement is not None]
     return {
         "sent": sent,
@@ -74,18 +75,21 @@ def resume(mailbox: Mailbox, today: date, step_back_days: int = 7) -> None:
     mailbox.status, mailbox.status_reason = "warming", "resumed manually"
 
 
-def simulate_day(db: Session, mailbox: Mailbox, today: date, rng: random.Random, list_quality: float = 0.99) -> MailboxDailyStat:
-    """Mock-mode only: generate a day of warm-up results so the dashboard shows real curves."""
+def simulate_day(db: Session, mailbox: Mailbox, today: date, rng: random.Random,
+                 list_quality: float = 0.998) -> MailboxDailyStat:
+    """Mock-mode only: generate a day of warm-up results so the dashboard shows real curves.
+    Additive and once per day, so it never overwrites campaign sends/bounces already recorded."""
     plan = evaluate(db, mailbox, today)
     sent = plan["quota"]
     stat = db.scalar(select(MailboxDailyStat).where(
         MailboxDailyStat.mailbox_id == mailbox.id, MailboxDailyStat.day == today)) \
-        or MailboxDailyStat(mailbox_id=mailbox.id, day=today)
+        or MailboxDailyStat(mailbox_id=mailbox.id, day=today, sent=0, cold_sent=0, bounces=0, complaints=0, replies=0)
+    if stat.planned:  # already simulated today
+        return stat
     stat.planned = plan["quota"]
-    stat.sent = sent
-    stat.bounces = sum(1 for _ in range(sent) if rng.random() > list_quality)
-    stat.complaints = 0
-    stat.replies = sum(1 for _ in range(sent) if rng.random() < 0.25)  # warm-up network replies
+    stat.sent = (stat.sent or 0) + sent
+    stat.bounces = (stat.bounces or 0) + sum(1 for _ in range(sent) if rng.random() > list_quality)
+    stat.replies = (stat.replies or 0) + sum(1 for _ in range(sent) if rng.random() < 0.25)  # warm-up network
     stat.inbox_placement = round(min(1.0, 0.7 + 0.01 * plan["day"] + rng.uniform(-0.05, 0.05)), 2) if sent else None
     db.add(stat)
     db.commit()

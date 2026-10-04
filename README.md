@@ -1,8 +1,18 @@
 # Outreach Infra
 
-A working prototype of the outbound infrastructure for reaching property owners over **SMS, voice and email**. It covers line provisioning, phone line health and spam monitoring, a single- and multi-line dialer, email deliverability checks, mailbox warm-up, a unified inbox, and a compliance layer that every send goes through.
+A working prototype of the outbound infrastructure for reaching property owners over **SMS, email and voice**. Its core is an **SMS and email pipeline** that:
 
-It runs end to end on a **simulated carrier**, so you can try every feature without paying for numbers. Set `TELEPHONY_PROVIDER=twilio` to switch to the Twilio adapter. The longer plan, from R&D to production, is in [docs/ROADMAP.md](docs/ROADMAP.md).
+- runs multi-step campaigns across both channels
+- picks sending phone lines and mailboxes within their health, warm-up, and pacing limits
+- passes every message through a compliance gate
+- processes replies, bounces, out-of-office messages, complaints, and unsubscribes as they arrive
+
+Around that core are phone-line health and spam monitoring, sending-domain health and blacklist checks, mailbox warm-up, a unified inbox, a dialer, and background jobs that keep it all running.
+
+It runs end to end on **simulated providers**, so you can try every feature without paying for numbers or mailboxes. Set `TELEPHONY_PROVIDER=twilio` or `EMAIL_PROVIDER=smtp` to use real ones.
+
+- **How email and SMS work, step by step:** [docs/EMAIL_AND_SMS.md](docs/EMAIL_AND_SMS.md)
+- **R&D → production plan:** [docs/ROADMAP.md](docs/ROADMAP.md)
 
 ![dashboard](docs/dashboard.png)
 
@@ -15,126 +25,160 @@ uvicorn app.main:app --reload
 # open http://localhost:8000
 ```
 
-On first start the app seeds a week of realistic outreach data: 15 lines across 5 metros, 360 leads, campaign traffic, replies, opt-outs, dial sessions, and 5 mailboxes at different warm-up stages. One line is a deliberately "burned" recycled number, so you can watch the monitor catch and quarantine it.
+The first start takes about 20 seconds. In that time the app replays a week of outreach **through the real campaign engine**:
 
-With Postgres:
+- 15 phone lines in 5 metros, and 240 leads
+- an SMS campaign and an email campaign
+- 3 sending domains and 5 mailboxes at different warm-up stages
+- the dispatcher run every 15 simulated minutes
 
-```bash
-docker compose up --build    # app on :8000, Postgres on :5432
-```
+Only the recipients are simulated (replies, opt-outs, out-of-office messages, bounces, complaints), so every number on the dashboard comes from production code paths. Scenarios built into the demo:
 
-Run the tests with `pytest` (56 tests, about 4s). There are no migrations yet, so after pulling schema changes, delete `outreach.db` and restart.
+| You'll see | Because |
+|---|---|
+| A Miami line rested with a "Spam Likely" label | It's a recycled number with a bad history; the health monitor catches it |
+| `acmehomesdeals.com` paused, and its mailbox sends nothing | The domain has no DKIM/DMARC |
+| Email going out only Monday to Friday, 8am–6pm local time | The email sending window |
+| Phoenix texts sent at 8:00 local time, not 7:00 | Quiet hours are per recipient time zone, and Arizona has no daylight saving time; messages wait instead of being dropped |
+| Leads with `gmial.com` addresses, landlines, and dead mailboxes skipped or suppressed | Recipient verification and line-type lookup |
+| No mailbox sending more than one campaign email every 6 minutes, or more than its daily cap | Pacing and warm-up-aware quotas |
+
+With Postgres: `docker compose up --build` (app on :8000, Postgres on :5432).
+
+Tests: `pytest` runs 96 tests in about 5 seconds. There are no migrations yet, so after pulling schema changes, delete `outreach.db` (and `outreach.db-wal` / `outreach.db-shm` if present) and restart.
 
 ## What to try in the dashboard
 
-| Tab | What it shows |
+| Tab | What it does |
 |---|---|
-| **Overview** | Delivery and filter rates, replies, opt-outs, calls, and mailbox status for the last 7 days |
-| **Phone lines** | Health score per line, spam label, daily cap usage, and why a line was rested or quarantined. Buy, rest, reactivate, and replace lines. Click a number to see its health history. |
-| **Email** | **Live** SPF / DKIM / DMARC / MX check for any domain you type. Each mailbox's warm-up curve, today's quota, bounce rate, and inbox placement. |
-| **Inbox** | Replies from every line, threaded by lead. Reply in place; the reply still goes through compliance. |
-| **Dialer** | Run a 1/2/3/5-line session and see the abandon rate. The dialer drops lines automatically when the rate exceeds 3%. |
-| **Compliance** | The suppression list (opt-outs, DNC, complaints). Add entries manually. |
+| **Overview** | 7-day SMS, email, and call outcomes, plus the campaign pipeline |
+| **Campaigns** | Each campaign's pipeline (active / replied / completed / stopped). **View** shows its steps with content checks, and every lead's current step, next send time, and reason (e.g. "deferred: outside 8am-9pm"). Activate, pause, or enroll leads. Background jobs show their last result, with a **Run** button for each. **New campaign** checks the content of each step as you type. |
+| **Phone lines** | Health score, spam label, daily usage, and why a line was rested or quarantined. Buy, rest, reactivate, or replace lines. Click a number to see its health history. |
+| **Email** | **Live** SPF/DKIM/DMARC/MX checks and **live** blacklist checks for any domain. **Live** email-address verification. Per-domain status and 7-day bounce rate. Each mailbox's warm-up curve, warm-up volume, and cold-email quota used today. |
+| **Inbox** | SMS and email replies threaded per lead (bounces and out-of-office messages filtered out). Reply by SMS or email; email replies thread under the original message, from the same mailbox. |
+| **Dialer** | 1/2/3/5-line sessions with a 30-day abandon rate. Lines drop automatically above the 3% limit. |
+| **Compliance** | The suppression list: opt-outs, DNC, wrong numbers, bounces, complaints, unsubscribes |
 
-**Simulate traffic** sends a live batch through the mock carrier, generates replies and opt-outs, and re-runs the health sweep.
+**Simulate traffic** adds 20 new leads, enrolls them in the active campaigns, and runs the dispatcher. Outside sending hours you'll see them scheduled for later instead of sent.
 
 ## Architecture
 
 ```
-                ┌──────────── Dashboard (static HTML + Chart.js) ────────────┐
-                                           │ REST
-┌──────────────────────────────── FastAPI (app/api.py) ─────────────────────────────────┐
-│  lines · monitor · sms · email · dialer · inbox · suppressions · webhooks (Twilio fmt) │
-└───────────────┬───────────────────────────────────────────────────────────────────────┘
-                │
-┌───────────────▼──────────── services/ (business logic, no HTTP) ──────────────────────┐
-│ compliance   ← every send passes through here: suppression, quiet hours, STOP/START   │
-│ sms          sender selection (sticky → local presence → healthiest), inbound handling│
-│ line_health  health score, rest/quarantine policy, spam-label checks, snapshots       │
-│ provisioning buy / retire / replace / replenish pools                                 │
-│ dialer       single + multi-line, adaptive to the 3% abandon limit                    │
-│ email_auth   live DNS: MX, SPF (incl. 10-lookup limit), DKIM selectors, DMARC         │
-│ warmup       ramp 5→40/day over 28d, pause on bounces/complaints, graduate            │
-└───────────────┬───────────────────────────────────────────────────────────────────────┘
-                │ TelephonyProvider protocol
-     ┌──────────┴──────────┐
-  MockCarrier          TwilioCarrier            (Telnyx / Bandwidth / own SIP trunk: same interface)
+            Dashboard (static HTML + Chart.js)          Recipients: unsubscribe page /u/{token}
+                         │ REST                                      │
+┌────────────────────────▼──────────────── FastAPI ──────────────────▼─────────────────────────┐
+│ api.py: campaigns · lines · email · inbox · dialer · suppressions · scheduler                │
+│ webhooks: /webhooks/sms/inbound · /sms/status (Twilio, signed) · /email/inbound (shared key) │
+└────────────────────────┬─────────────────────────────────────────────────────────────────────┘
+                         │
+┌────────────────────────▼──────── services/ (business logic, no HTTP) ────────────────────────┐
+│ campaigns       sequences + dispatcher: send / defer / skip / stop each due step             │
+│ compliance      THE gate: suppression, quiet hours, frequency cap, opt-out language          │
+│ sms             line selection (sticky → local → healthiest), pacing, inbound STOP/START     │
+│ email_sender    mailbox selection, RFC-compliant messages, threading, inbound classification │
+│ email_verify    syntax / typo / disposable / MX / role-account checks                        │
+│ content_lint    SMS segments + encoding, shorteners, opt-out wording, SHAFT, spam phrases    │
+│ line_health     line score, rest/quarantine, spam labels       warmup   mailbox ramp + pause │
+│ domain_health   auth + blacklists + domain-wide bounce/complaint limits → pause domain       │
+│ enrollment_events   a reply / opt-out / bounce stops sequences the moment it arrives         │
+│ dialer · provisioning · email_auth (live DNS) · simulation (demo only)                       │
+└──────────────┬──────────────────────────────────────────────┬────────────────────────────────┘
+               │ TelephonyProvider                            │ EmailProvider
+     MockCarrier │ TwilioCarrier                     MockEmailProvider │ SMTPEmailProvider
+                                                     (Gmail API / Microsoft Graph: same interface)
+
+scheduler.py (background thread): dispatcher 30s · line health 15m · spam labels, domain health 24h · warm-up 6h
 ```
 
-Data lives in SQLAlchemy models ([app/models.py](app/models.py)), which run on SQLite locally and on Postgres in Docker or production.
+Data lives in SQLAlchemy models ([app/models.py](app/models.py)), on SQLite (WAL mode) locally and on Postgres in Docker or production.
 
 ## Key design decisions
 
-**One compliance gate for every channel.** `compliance.can_contact()` runs before every SMS, call, and reply, including replies an agent types in the inbox. A blocked send is still logged with `status=blocked` and a reason, which leaves an audit trail. The gate covers:
+The full walkthrough is in [docs/EMAIL_AND_SMS.md](docs/EMAIL_AND_SMS.md). The short version:
 
-- **Quiet hours** in the *recipient's* local time (Arizona has no DST). When we can't place the recipient, the send is allowed only inside 8am–9pm in **every** US zone, Hawaii and Alaska included.
-- **Frequency cap:** at most 3 texts and calls per *phone number* per 24h, the limit in the Florida, Oklahoma, and Maryland laws. It counts per phone, not per lead, because one owner often has several properties.
-- **Opt-outs:** exact keywords (STOP, QUIT…) and natural-language revocations ("please stop texting me", "don't contact me"), which the FCC has required honoring since April 2025. "Yes" is deliberately **not** an opt-in keyword, because it's the most common answer to "would you consider an offer?"
-- **Wrong numbers:** suppressed on every channel. Reassigned numbers are a leading source of TCPA suits.
-- An SMS opt-out also covers voice. START re-subscribes only opt-outs, never DNC or wrong-number entries. Each confirmation is sent once and logged.
+**Defer, don't drop.** When a campaign step can't go out right now, the dispatcher decides what happens next:
+- **Wait:** outside quiet hours, frequency cap reached, a mailbox or line is pacing, or no capacity left today. The step is rescheduled for the next allowed time.
+- **Skip:** a landline, an invalid address, or a missing channel. The sequence continues with the next step.
+- **Stop:** the person opted out, bounced, or complained.
 
-**Automation stops when a person replies.** Once a phone number has replied, automated follow-ups to it are blocked, and the conversation continues in the inbox with a human. Inbox replies skip the frequency cap but still go through suppression and quiet hours. A reply is threaded to the property we last texted about from that line, not just any lead with that phone.
+A message is never silently lost, and every decision is visible per lead in the Campaigns tab.
 
-**The health score separates line problems from list problems.** Carrier error 30007 (filtered) and opt-outs count against a line. Landline and unreachable-number errors (30003, 30005, 30006) say nothing about the line, so they're excluded. A line with a bad lead list shouldn't get rested.
+**One compliance gate.** `compliance.check()` runs before every text, call, and email, including inbox replies. It returns `send | defer(retry_at) | skip | stop`. It covers:
+- suppression (opt-out, DNC, wrong number, bounce, complaint, unsubscribe)
+- TCPA quiet hours in the recipient's time zone, conservative when the zone is unknown
+- at most 3 texts and calls per phone number per 24h, the Florida, Oklahoma, and Maryland limit
+- natural-language opt-outs ("please stop texting me"), which the FCC has required honoring since April 2025
 
-| Signal | Effect on score |
-|---|---|
-| Carrier-filtered rate | −3 per 1% (max −60) |
-| Opt-out rate | −5 per 1% (max −30) |
-| "Spam Likely" label | −30 |
-| Reply rate | +1 per 1% (max +10) |
+**A reply stops automation everywhere, immediately.** An inbound reply on any channel closes all of that person's active sequences at once, matched by phone or email. Out-of-office messages and bounces don't count as replies.
 
-Below 70 the line rests for 48h. Below 50 it's quarantined until a human reactivates or replaces it. Rates are ignored until a line has sent at least 20 messages.
+**Email follows the 2024 Gmail/Yahoo bulk-sender rules:**
+- SPF, DKIM, and DMARC are required. A domain missing any of them is paused automatically.
+- RFC 8058 one-click `List-Unsubscribe` headers, plus a CAN-SPAM footer with a physical address.
+- The unsubscribe link needs a confirming **POST**, because corporate link scanners open every URL in an email and would otherwise unsubscribe people who never clicked.
+- Spam complaints suppress the address and count against the mailbox and domain.
 
-When a rest ends, the line gets a fresh reputation lookup. If it's still "Spam Likely", the rest is extended. Otherwise it comes back with a **reset metrics window**, so it's judged on new traffic rather than on the traffic that got it rested. Without the reset, a rested line goes straight back into rest on the next sweep and never recovers. Replacing a line moves its conversations to the new number.
+**Protect the sending assets:**
+- Mailboxes send no campaign email before warm-up day 14, then ramp up to a daily cap.
+- Each mailbox waits at least 6 minutes between campaign emails, and each line 20 seconds between automated texts.
+- Scheduled sends are spread out randomly, so a batch of leads doesn't all go out at 8:00:00.
+- A follow-up must come from its thread's mailbox, inside that mailbox's limits.
+- A bad domain pauses only its own mailboxes; the others keep sending.
 
-**Warm-up acts only on meaningful samples.** An early bug from testing: with 5–10 emails a day, one bounce reads as a 5% bounce rate and paused healthy mailboxes. The pause rule now needs 50+ sends and at least 3 bounces (or 2 complaints) in the trailing 7 days. Resuming a paused mailbox steps the ramp back a week instead of continuing at full volume.
+**Separate list problems from asset problems:**
+- Landline and dead-number errors don't hurt a line's health score.
+- Bad addresses are caught before sending (typo domains, disposable providers, no MX record).
+- Line type is looked up once per lead, and landlines skip SMS steps.
 
-**Sender selection.** The order is: the number the lead was first contacted from (sticky, so the conversation stays in one thread), then a line in the lead's area code (local presence), then the healthiest line with remaining daily capacity. Texts and calls have separate per-line daily caps (150 and 100).
+**Check content before sending.** A campaign can't be activated while any step has content errors:
+- public link shorteners
+- a first text without opt-out wording
+- unknown merge fields
+- SHAFT (sex, hate, alcohol, firearms, tobacco) and cannabis content
 
-**The dialer measures abandonment over 30 days.** The FTC's 3% limit applies per campaign over 30 days, so the dialer counts the trailing month, not just the current session, before deciding how many lines to dial.
+Warnings flag cost and deliverability problems without blocking activation. For example, a single curly apostrophe (’) switches a text from 160 to 70 characters per segment.
 
-**SPF lookups are counted recursively.** The 10-lookup limit includes everything nested inside each `include:`. github.com, for example, has 8 top-level mechanisms but 10 lookups in total.
-
-**The provider interface is narrow on purpose.** `buy_number`, `release_number`, `send_sms`, `place_call`, and `reputation_lookup`. Moving to Telnyx, Bandwidth, or our own SIP trunk changes only the adapter.
+**Line health:** the score uses the carrier-filter rate, opt-out rate, spam label, and reply rate. Below 70 a line rests for 48h; below 50 it's quarantined. When a rest ends, the label is checked again and the metrics window resets, so the line is judged on new traffic.
 
 ## What's real vs simulated
 
 | Real | Simulated / stubbed |
 |---|---|
-| DNS checks (SPF/DKIM/DMARC/MX) against live DNS | Carrier delivery outcomes, filtering, and call outcomes (`MockCarrier`) |
-| Compliance logic, quiet hours, STOP/START handling | Spam-label lookups (production would use Hiya / TNS / First Orion) |
-| Health scoring, rest/quarantine policy, line rotation | Warm-up email sending and inbox-placement seed tests |
-| Twilio REST adapter (buy, send, call), webhook signature verification, out-of-order status handling | iMessage (see the roadmap: research only) |
-| Dialer pacing and abandon-rate control | Agent audio bridging (would be TwiML or FreeSWITCH) |
+| Campaign engine, dispatcher, compliance gate, pacing, quotas, threading, inbound classification | Carrier delivery and filtering, call outcomes (`MockCarrier`) |
+| Live DNS: SPF (recursive 10-lookup count), DKIM, DMARC, MX, DNS blacklists (Spamhaus DBL, SURBL, URIBL), recipient MX | Recipients' replies, bounces, out-of-office messages, complaints (demo seed only) |
+| RFC 5322 / 8058 message construction, signed unsubscribe links, one-click unsubscribe endpoint | Spam-label lookups (production: Hiya / TNS / First Orion) |
+| SMTP sending adapter, Twilio REST adapter (send, buy, call, line-type lookup), webhook signature checks | The warm-up network, and inbox-placement seed tests |
+| Line health, domain health, warm-up gating, background scheduler | iMessage (roadmap: research only) |
 
-The Twilio adapter follows the Twilio REST API but has **not** been run against a live account.
+The Twilio and SMTP adapters follow their protocols but have **not** been run against live accounts.
 
 ### Known limitations (next steps)
 
-- **No authentication** on the API or dashboard. Anyone who can reach the server can send messages. Add login and roles before any real deployment.
-- **Jobs run on request**, not on a schedule. The health sweep, spam checks, and warm-up evaluation run when the dashboard or a simulate call triggers them. Some GET endpoints update state (warm-up status, read receipts); in production these move to a scheduler (APScheduler or Celery beat).
-- **Daily caps reset at midnight UTC**, not in each line's local time.
-- **Area-code time zones** use a partial map. Production needs the full NANPA dataset. Cell numbers also move with their owners, so the property's location is a useful second signal.
-- **No migrations yet** (Alembic is next).
+- **No authentication** on the API or dashboard. Add login and roles before any real deployment.
+- **Inbound email arrives through a webhook.** Production needs a poller per mailbox (Gmail API watch, Microsoft Graph subscriptions, or IMAP IDLE) posting to `/webhooks/email/inbound`.
+- **The scheduler is an in-process thread.** At scale, move jobs to a queue (Celery or RQ with Redis) with one dispatcher process.
+- **Verification stops at MX.** Mailbox-level SMTP verification (ZeroBounce, NeverBounce) would catch dead mailboxes before the first send.
+- **Daily caps reset at midnight UTC.** The area-code time-zone map is partial. There are no migrations yet (Alembic is next).
 
 ## About "stealth / protection"
 
-I built *protection* to mean keeping our own infrastructure healthy and recoverable: rotating, resting, and replacing degraded lines, separate sending domains so one burned domain doesn't take down the others, sticky senders, per-line caps, and webhook signature checks. I deliberately did **not** build tools to evade carrier spam filters or impersonate other senders. That's a fast way to get the whole 10DLC brand or the company's domains banned, and it creates TCPA liability. More in [docs/ROADMAP.md](docs/ROADMAP.md#stealth--protection).
+I built *protection* as keeping our own infrastructure healthy and recoverable: pacing, quotas, warm-up gating, isolated domains, rest/quarantine/replace for lines, and automatic domain pauses. I deliberately did **not** build tools to evade carrier or mailbox spam filters (content spinning, snowshoeing, spoofing). That's how a 10DLC brand or a set of domains gets banned outright, and it creates TCPA liability. More in [docs/ROADMAP.md](docs/ROADMAP.md#stealth--protection).
 
 ## Project layout
 
 ```
 app/
-  main.py            app factory, seeding, static dashboard
-  api.py             REST endpoints + Twilio-format webhooks
+  main.py            app startup: tables, demo seed, scheduler, routers
+  api.py             REST endpoints, webhooks, unsubscribe pages
+  scheduler.py       background jobs
   models.py          SQLAlchemy models
-  config.py          all thresholds and policies (env-overridable)
-  providers/         base protocol, mock carrier, Twilio adapter
-  services/          compliance, sms, line_health, provisioning, dialer, email_auth, warmup, simulation
+  config.py          every threshold and policy (env-overridable, see .env.example)
+  providers/         telephony (mock, Twilio) and email (mock, SMTP) adapters
+  services/          campaigns, compliance, sms, email_sender, email_verify, content_lint,
+                     line_health, domain_health, warmup, enrollment_events, dialer, provisioning,
+                     email_auth, simulation
   static/index.html  dashboard
-tests/               56 tests: compliance, line health, routing, DNS parsing, warm-up, dialer, webhooks
-docs/ROADMAP.md      R&D → production plan
+tests/               96 tests
+docs/                EMAIL_AND_SMS.md (how it works), ROADMAP.md (R&D → production)
 ```
 
 API docs: http://localhost:8000/docs

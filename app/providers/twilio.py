@@ -63,6 +63,19 @@ class TwilioCarrier:
         r.raise_for_status()
         return CallResult(provider_sid=r.json()["sid"], outcome="queued")
 
+    def line_type(self, e164: str) -> str:
+        # Lookup v2 Line Type Intelligence (~$0.008/lookup).
+        r = self._client.get(f"https://lookups.twilio.com/v2/PhoneNumbers/{e164}",
+                             params={"Fields": "line_type_intelligence"})
+        if r.status_code == 404:
+            return "invalid"
+        r.raise_for_status()
+        body = r.json()
+        if not body.get("valid", True):
+            return "invalid"
+        kind = ((body.get("line_type_intelligence") or {}).get("type") or "").lower()
+        return {"mobile": "mobile", "landline": "landline", "fixedvoip": "voip", "nonfixedvoip": "voip"}.get(kind, "mobile")
+
     def reputation_lookup(self, e164: str) -> str:
         # Twilio doesn't expose spam labels directly; production would query a
         # reputation vendor (Hiya, TNS, First Orion via a registration service).

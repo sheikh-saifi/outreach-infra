@@ -5,6 +5,9 @@ _tmp = tempfile.mkdtemp()
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["SEED_DEMO_DATA"] = "false"
 os.environ["TELEPHONY_PROVIDER"] = "mock"
+os.environ["EMAIL_PROVIDER"] = "mock"
+os.environ["ENABLE_SCHEDULER"] = "false"
+os.environ["SEND_JITTER_MINUTES"] = "0"  # deterministic schedules in tests
 
 import pytest  # noqa: E402
 

@@ -170,9 +170,10 @@ class AlwaysAnswers:
 def test_abandon_rate_uses_30_day_history(db, make_line, make_lead, monkeypatch):
     monkeypatch.setattr(dialer, "get_carrier", lambda: AlwaysAnswers())
     line = make_line()
+    past = make_lead("+12145550999")
     # earlier this month: 10 abandoned out of 100 answered = 10%, far over the limit
     for i in range(100):
-        db.add(CallLog(session_id="old", number_id=line.id, lead_id=1,
+        db.add(CallLog(session_id="old", number_id=line.id, lead_id=past.id,
                        outcome="abandoned" if i < 10 else "answered", started_at=NOON - timedelta(days=5)))
     db.commit()
     leads = [make_lead(f"+1214557{i:04d}") for i in range(3)]

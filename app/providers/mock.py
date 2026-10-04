@@ -1,6 +1,7 @@
 """Simulated carrier. Each number gets a hidden 'true reputation' that degrades with volume,
 so the health monitor has a realistic signal to detect without spending money on real lines."""
 
+import hashlib
 import random
 import uuid
 
@@ -8,7 +9,10 @@ from app.providers.base import CallResult, ProvisionedNumber, SendResult
 
 
 class MockCarrier:
+    """Reputations are derived from the number itself, so they survive restarts.
+    Numbers ending in RECYCLED_SUFFIX simulate recycled numbers with a bad history."""
     name = "mock"
+    RECYCLED_SUFFIX = "13"
 
     def __init__(self, seed: int | None = None):
         self._rng = random.Random(seed)
@@ -17,8 +21,12 @@ class MockCarrier:
 
     def _rep(self, e164: str) -> float:
         if e164 not in self._reputation:
-            # Most lines start healthy; the odd one is a "recycled" number with some baggage.
-            self._reputation[e164] = self._rng.choice([0.99, 0.98, 0.97, 0.96, 0.95, 0.93, 0.85])
+            if e164.endswith(self.RECYCLED_SUFFIX):
+                self._reputation[e164] = 0.35
+            else:
+                # Most lines start healthy; the odd one has some baggage.
+                h = int(hashlib.sha256(e164.encode()).hexdigest()[:8], 16)
+                self._reputation[e164] = [0.99, 0.98, 0.97, 0.96, 0.95, 0.93, 0.85][h % 7]
         return self._reputation[e164]
 
     def reputation(self, e164: str) -> float:
@@ -63,6 +71,11 @@ class MockCarrier:
         if r < answer_p + 0.33:
             return CallResult(sid, "failed")
         return CallResult(sid, "no_answer")
+
+    def line_type(self, e164: str) -> str:
+        # Deterministic per number: ~8% landlines, ~3% VoIP, ~1% disconnected.
+        tail = int(e164[-2:])
+        return "landline" if tail < 8 else "voip" if tail < 11 else "invalid" if tail == 99 else "mobile"
 
     def reputation_lookup(self, e164: str) -> str:
         rep = self._rep(e164)

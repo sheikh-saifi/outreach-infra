@@ -40,6 +40,11 @@ class TelephonyProvider(Protocol):
         """Return 'clean' | 'spam_likely' | 'unknown' from carrier analytics (Hiya/TNS/First Orion)."""
         ...
 
+    def line_type(self, e164: str) -> str:
+        """Return 'mobile' | 'landline' | 'voip' | 'invalid'. Texts to landlines are wasted money
+        and count as failures, so look up once per lead and cache it."""
+        ...
+
 
 # Carrier error codes (Twilio numbering) that tell us something about the *sending line*
 # rather than the recipient. Only these should hurt a line's health score.

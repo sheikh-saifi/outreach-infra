@@ -9,6 +9,7 @@ Covers the rules that get outbound teams sued or banned:
 """
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,16 @@ class ComplianceError(Exception):
     pass
 
 
+@dataclass
+class Decision:
+    """What to do with a send. A campaign uses `action` to decide between giving up on a lead
+    (stop), trying again later (defer, at `retry_at`) or moving on to the next step (skip)."""
+    ok: bool
+    reason: str = "ok"
+    action: str = "send"  # send | stop | defer | skip
+    retry_at: datetime | None = None
+
+
 def normalize_phone(raw: str) -> str:
     digits = re.sub(r"\D", "", raw)
     if len(digits) == 10:
@@ -69,24 +80,56 @@ def lead_timezones(lead: Lead) -> list[str]:
     return US_ZONES
 
 
-def within_contact_window(lead: Lead, now_utc: datetime | None = None) -> bool:
-    now_utc = now_utc or datetime.now(timezone.utc)
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
+def _aware(t: datetime | None) -> datetime:
+    t = t or datetime.now(timezone.utc)
+    return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
+
+
+def _naive(t: datetime) -> datetime:
+    return t.astimezone(timezone.utc).replace(tzinfo=None) if t.tzinfo else t
+
+
+def in_window(lead: Lead, t: datetime, start: int, end: int, weekdays_only: bool = False) -> bool:
+    """True if `t` falls in [start, end) local hours in every time zone the lead might be in."""
+    t = _aware(t)
     for tz in lead_timezones(lead):
-        hour = now_utc.astimezone(ZoneInfo(tz)).hour
-        if not (settings.quiet_hours_end <= hour < settings.quiet_hours_start):
+        local = t.astimezone(ZoneInfo(tz))
+        if not (start <= local.hour < end) or (weekdays_only and local.weekday() >= 5):
             return False
     return True
 
 
-def is_suppressed(db: Session, value: str, channel: str) -> Suppression | None:
-    return db.scalar(
-        select(Suppression).where(
-            Suppression.value == value.lower(),
-            or_(Suppression.channel == channel, Suppression.channel == "all"),
-        )
-    )
+def within_contact_window(lead: Lead, now_utc: datetime | None = None) -> bool:
+    """TCPA calling hours: 8am-9pm recipient local time."""
+    return in_window(lead, _aware(now_utc), settings.quiet_hours_end, settings.quiet_hours_start)
+
+
+def within_email_window(lead: Lead, now_utc: datetime | None = None) -> bool:
+    """Not a legal rule: cold email sent at 3am or on Sunday looks automated and gets fewer replies."""
+    return in_window(lead, _aware(now_utc), settings.email_send_start, settings.email_send_end, weekdays_only=True)
+
+
+def next_window(lead: Lead, after: datetime, channel: str = "sms") -> datetime:
+    """Earliest time (naive UTC, 15-minute grid) at or after `after` when this lead can be contacted."""
+    check = within_email_window if channel == "email" else within_contact_window
+    if check(lead, _aware(after)):
+        return _naive(_aware(after))
+    t = _aware(after)
+    t = t.replace(minute=(t.minute // 15) * 15, second=0, microsecond=0)
+    if t < _aware(after):
+        t += timedelta(minutes=15)
+    for _ in range(4 * 24 * 8):  # look up to 8 days ahead (covers a weekend)
+        if check(lead, t):
+            return _naive(t)
+        t += timedelta(minutes=15)
+    return _naive(_aware(after) + timedelta(days=1))
+
+
+def is_suppressed(db: Session, value: str, channel: str | list[str]) -> Suppression | None:
+    """One query, whether checking one channel or several (an SMS send checks sms + voice + all)."""
+    channels = [channel] if isinstance(channel, str) else list(channel)
+    return db.scalar(select(Suppression).where(
+        Suppression.value == value.lower(), Suppression.channel.in_([*channels, "all"])).limit(1))
 
 
 def suppress(db: Session, value: str, channel: str, reason: str) -> None:
@@ -102,24 +145,33 @@ def unsuppress(db: Session, value: str, channel: str, reasons: tuple[str, ...] =
         db.delete(row)
 
 
-def can_contact(db: Session, lead: Lead, channel: str, now_utc: datetime | None = None,
-                enforce_frequency: bool = True) -> tuple[bool, str]:
-    """`enforce_frequency=False` is for a human replying inside a conversation the lead continued."""
+def check(db: Session, lead: Lead, channel: str, now_utc: datetime | None = None,
+          enforce_frequency: bool = True) -> Decision:
+    """The single compliance gate. `enforce_frequency=False` is for a human replying inside a
+    conversation the lead continued."""
+    now = _aware(now_utc)
     target = lead.email if channel == "email" else lead.phone
     if not target:
-        return False, f"lead has no {'email' if channel == 'email' else 'phone'}"
+        return Decision(False, f"lead has no {'email' if channel == 'email' else 'phone'}", "skip")
     # A text opt-out also covers calls; an email opt-out only covers email.
-    channels = ["email"] if channel == "email" else [channel, "sms", "voice"]
-    for ch in channels:
-        if (s := is_suppressed(db, target, ch)):
-            return False, f"suppressed ({s.reason})"
+    channels = ["email"] if channel == "email" else ["sms", "voice"]
+    if (s := is_suppressed(db, target, channels)):
+        return Decision(False, f"suppressed ({s.reason})", "stop")
     if channel in ("sms", "voice"):
-        if not within_contact_window(lead, now_utc):
-            return False, "outside 8am-9pm recipient local time"
-        touches = touches_last_24h(db, lead.phone, now_utc) if enforce_frequency else 0
-        if touches >= settings.max_touches_per_24h:
-            return False, f"frequency cap ({touches} touches in 24h)"
-    return True, "ok"
+        if not within_contact_window(lead, now):
+            return Decision(False, "outside 8am-9pm recipient local time", "defer", next_window(lead, now))
+        if enforce_frequency:
+            touches = touches_last_24h(db, lead.phone, now)
+            if touches >= settings.max_touches_per_24h:
+                return Decision(False, f"frequency cap ({touches} touches in 24h)", "defer",
+                                next_window(lead, now + timedelta(hours=12)))
+    return Decision(True)
+
+
+def can_contact(db: Session, lead: Lead, channel: str, now_utc: datetime | None = None,
+                enforce_frequency: bool = True) -> tuple[bool, str]:
+    d = check(db, lead, channel, now_utc, enforce_frequency)
+    return d.ok, d.reason
 
 
 def touches_last_24h(db: Session, phone: str, now_utc: datetime | None = None) -> int:
