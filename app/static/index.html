@@ -264,7 +264,8 @@ async function api(path, opts = {}) {
   const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts,
                                body: opts.body ? JSON.stringify(opts.body) : undefined});
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : r.statusText);
+  if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail
+                             : data.detail?.message ?? (data.detail ? JSON.stringify(data.detail) : r.statusText));
   return data;
 }
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3500); }
@@ -600,6 +601,7 @@ async function loadSup() {
     s.map(x => `<tr><td>${esc(x.value)}</td><td>${x.channel}</td><td><span class="chip">${x.reason}</span></td><td class="muted small">${when(x.at)}</td></tr>`).join("");
 }
 $("#sp-go").onclick = async () => {
+  if (!$("#sp-v").value.trim()) return toast("Enter a phone number or email address first");
   try { const r = await api("/api/suppressions", {method: "POST", body: {value: $("#sp-v").value, channel: $("#sp-ch").value, reason: $("#sp-r").value}});
         toast(`Suppressed ${r.suppressed}`); loadSup(); } catch (e) { toast(e.message); }
 };

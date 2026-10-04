@@ -419,3 +419,18 @@ def test_human_reply_uses_thread_mailbox_without_pacing(db, mailbox, email_lead)
     first = email_sender.send(db, lead, "Hi", "one", now=NOON, enrollment_id=_enrolled(db, lead).id)
     reply = email_sender.send(db, lead, "x", "Sure, call me at 3?", now=NOON, automated=False, reply_to=first)
     assert reply.status == "sent" and reply.mailbox_id == mb.id and reply.subject == "Re: Hi"
+
+
+@pytest.mark.parametrize("value,code", [("", 422), ("hello", 422), ("bad@", 422), ("214-555-1234", 200),
+                                        ("Owner@Gmail.com", 200)])
+def test_suppression_input_is_validated(db, value, code):
+    with TestClient(app) as c:
+        r = c.post("/api/suppressions", json={"value": value, "channel": "all", "reason": "manual"})
+    assert r.status_code == code
+    if code == 200:
+        assert r.json()["suppressed"] in ("+12145551234", "owner@gmail.com")
+
+
+def test_malformed_inbound_sms_is_rejected_not_crashed(db):
+    with TestClient(app) as c:
+        assert c.post("/webhooks/sms/inbound", data={"From": "", "To": "+12145550000", "Body": "hi"}).status_code == 400

@@ -220,7 +220,16 @@ def list_suppressions(db: Session = Depends(get_db)):
 
 @api.post("/suppressions")
 def add_suppression(body: SuppressionIn, db: Session = Depends(get_db)):
-    value = body.value if "@" in body.value else compliance.normalize_phone(body.value)
+    raw = body.value.strip()
+    if "@" in raw:
+        if not email_verify.EMAIL_RE.match(raw):
+            raise HTTPException(422, f"'{raw}' is not a valid email address")
+        value = raw.lower()
+    else:
+        try:
+            value = compliance.normalize_phone(raw)
+        except ValueError:
+            raise HTTPException(422, "Enter a US phone number (e.g. 214-555-1234) or an email address")
     compliance.suppress(db, value, body.channel, body.reason)
     db.commit()
     return {"suppressed": value}
@@ -565,7 +574,10 @@ async def _verified_form(request: Request) -> dict:
 @webhooks.post("/sms/inbound")
 async def inbound_sms(request: Request, db: Session = Depends(get_db)):
     form = await _verified_form(request)
-    return sms.handle_inbound(db, form["From"], form["To"], form.get("Body", ""))
+    try:
+        return sms.handle_inbound(db, form["From"], form["To"], form.get("Body", ""))
+    except (KeyError, ValueError) as e:  # malformed carrier payload: reject it, don't crash
+        raise HTTPException(400, f"invalid inbound message: {e}")
 
 
 # Callbacks can arrive out of order (a late "sent" after "delivered"); never move a message backwards.
